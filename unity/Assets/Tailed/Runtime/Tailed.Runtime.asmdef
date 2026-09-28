@@ -1,0 +1,23 @@
+{
+    "name": "Tailed.Runtime",
+    "rootNamespace": "Tailed",
+    "references": [
+        "Tailed.Core",
+        "Unity.InputSystem",
+        "Unity.RenderPipelines.Core.Runtime",
+        "Unity.RenderPipelines.Universal.Runtime",
+        "UnityEngine.UI",
+        "Unity.Netcode.Runtime",
+        "Unity.Collections",
+        "Unity.Networking.Transport"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

@@ -1,0 +1,7 @@
+{
+  "name": "com.tailed.core",
+  "version": "0.1.0",
+  "displayName": "Tailed Core",
+  "description": "Engine-agnostic simulation core for TAILED: traffic, identity, rules, net codecs. No UnityEngine references; also built by dotnet/Tailed.Core.",
+  "unity": "6000.5"
+}
