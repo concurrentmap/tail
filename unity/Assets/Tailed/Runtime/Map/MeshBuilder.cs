@@ -228,6 +228,62 @@ namespace Tailed.Map
 
         // ---- smooth-shaded primitives (characters, tyres): shared vertices, radial normals ----
 
+        /// <summary>
+        /// Smooth torus (or an arc of one) in the XY plane around <paramref name="centre"/>: ring radius
+        /// <paramref name="R"/>, tube radius <paramref name="r"/>, from angle a0 to a1 (radians).
+        /// Shared vertices, so it shades round (steering-wheel rims, bezels).
+        /// </summary>
+        public void Torus(Vector3 centre, float R, float r, Color color, int ringSegs = 48, int tubeSegs = 12, float a0 = 0f, float a1 = Mathf.PI * 2f)
+        {
+            var c = color.linear;
+            int start = _verts.Count;
+            for (int i = 0; i <= ringSegs; i++)
+            {
+                float u = Mathf.Lerp(a0, a1, i / (float)ringSegs);
+                var d = new Vector3(Mathf.Cos(u), Mathf.Sin(u), 0f);
+                for (int j = 0; j <= tubeSegs; j++)
+                {
+                    float v = j * Mathf.PI * 2f / tubeSegs;
+                    var n = d * Mathf.Cos(v) + Vector3.forward * Mathf.Sin(v);
+                    Vert(centre + d * R + n * r, n, c);
+                }
+            }
+            int row = tubeSegs + 1;
+            for (int i = 0; i < ringSegs; i++)
+                for (int j = 0; j < tubeSegs; j++)
+                {
+                    int a = start + i * row + j, b = a + row, cc = b + 1, dd = a + 1;
+                    _tris.Add(a); _tris.Add(b); _tris.Add(cc);
+                    _tris.Add(a); _tris.Add(cc); _tris.Add(dd);
+                }
+        }
+
+        /// <summary>Smooth round tube from <paramref name="a"/> to <paramref name="b"/> with ball ends (a capsule).</summary>
+        public void Capsule(Vector3 a, Vector3 b, float r, Color color, int sides = 12)
+        {
+            var c = color.linear;
+            var w = (b - a).normalized;
+            var u = Vector3.Cross(w, Mathf.Abs(w.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
+            var v = Vector3.Cross(w, u);
+            int start = _verts.Count;
+            foreach (var end in new[] { a, b })
+                for (int j = 0; j <= sides; j++)
+                {
+                    float t = j * Mathf.PI * 2f / sides;
+                    var n = u * Mathf.Cos(t) + v * Mathf.Sin(t);
+                    Vert(end + n * r, n, c);
+                }
+            int row = sides + 1;
+            for (int j = 0; j < sides; j++)
+            {
+                int p0 = start + j, p1 = p0 + 1, q0 = p0 + row, q1 = q0 + 1;
+                _tris.Add(p0); _tris.Add(p1); _tris.Add(q1);
+                _tris.Add(p0); _tris.Add(q1); _tris.Add(q0);
+            }
+            SmoothSphere(a, Vector3.one * r, color, sides, sides / 2 + 1);
+            SmoothSphere(b, Vector3.one * r, color, sides, sides / 2 + 1);
+        }
+
         int Vert(Vector3 p, Vector3 n, Color linear)
         {
             _verts.Add(p); _normals.Add(n); _colors.Add(linear);
@@ -381,6 +437,76 @@ namespace Tailed.Map
             var r = forward.Normalized.PerpRight * (width * 0.5f);
             // Counter-clockwise from above (x east, y north).
             return new[] { centre - f + r, centre + f + r, centre + f - r, centre - f - r };
+        }
+
+        /// <summary>
+        /// Append a whole mesh (all submeshes into the current one) under a transform. Colours pass
+        /// through <paramref name="color"/>, which gets the source colour and returns a linear one.
+        /// A mirroring transform flips the winding so faces stay outward.
+        /// </summary>
+        public void Append(Mesh src, Matrix4x4 m, System.Func<Color, Color> color)
+        {
+            var verts = src.vertices;
+            var normals = src.normals;
+            var colors = src.colors;
+            int offset = _verts.Count;
+            var nm = m.inverse.transpose;
+            for (int i = 0; i < verts.Length; i++)
+            {
+                _verts.Add(m.MultiplyPoint3x4(verts[i]));
+                _normals.Add(nm.MultiplyVector(normals[i]).normalized);
+                _colors.Add(color(colors.Length > i ? colors[i] : Color.white));
+            }
+            bool flip = m.determinant < 0f;
+            for (int sm = 0; sm < src.subMeshCount; sm++)
+            {
+                var tris = src.GetTriangles(sm);
+                for (int t = 0; t < tris.Length; t += 3)
+                {
+                    _tris.Add(offset + tris[t]);
+                    _tris.Add(offset + tris[flip ? t + 2 : t + 1]);
+                    _tris.Add(offset + tris[flip ? t + 1 : t + 2]);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Build as one mesh per square tile of the ground plane (by triangle centroid), so cameras,
+        /// mirrors and shadow cascades can cull what they can't see. Submesh 0 only.
+        /// </summary>
+        public List<Mesh> BuildTiles(string name, float tile)
+        {
+            var groups = new Dictionary<long, List<int>>();
+            var tris = _submeshes[0];
+            for (int t = 0; t < tris.Count; t += 3)
+            {
+                var c = (_verts[tris[t]] + _verts[tris[t + 1]] + _verts[tris[t + 2]]) / 3f;
+                long key = ((long)Mathf.FloorToInt(c.x / tile) << 32) ^ (uint)Mathf.FloorToInt(c.z / tile);
+                if (!groups.TryGetValue(key, out var list)) groups[key] = list = new List<int>();
+                list.Add(t);
+            }
+            var meshes = new List<Mesh>();
+            foreach (var g in groups.Values)
+            {
+                var map = new Dictionary<int, int>();
+                var v = new List<Vector3>(); var n = new List<Vector3>(); var col = new List<Color32>(); var idx = new List<int>(); // Color32: tiles are the bulk of the town
+                foreach (int t in g)
+                    for (int k = 0; k < 3; k++)
+                    {
+                        int o = tris[t + k];
+                        if (!map.TryGetValue(o, out int ni))
+                        {
+                            ni = v.Count; map[o] = ni;
+                            v.Add(_verts[o]); n.Add(_normals[o]); col.Add((Color32)_colors[o]);
+                        }
+                        idx.Add(ni);
+                    }
+                var mesh = new Mesh { name = name, indexFormat = v.Count > 65000 ? IndexFormat.UInt32 : IndexFormat.UInt16 };
+                mesh.SetVertices(v); mesh.SetNormals(n); mesh.SetColors(col); mesh.SetTriangles(idx, 0);
+                mesh.RecalculateBounds();
+                meshes.Add(mesh);
+            }
+            return meshes;
         }
 
         public Mesh Build(string name)

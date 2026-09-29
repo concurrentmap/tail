@@ -51,8 +51,9 @@ namespace Tailed.Game
                     night = 1f; vis = 0.6f; head = 1f;
                     break;
                 default:
-                    sunRot = Quaternion.Euler(48f, -35f, 0f); sunColor = new Color(1f, 0.95f, 0.86f); sunIntensity = 1.35f;
-                    ambSky = new Color(0.66f, 0.76f, 0.92f); ambEq = new Color(0.62f, 0.66f, 0.66f); ambGround = new Color(0.38f, 0.36f, 0.33f);
+                    // Warm key light, softer blue fill: shapes read, colours stay rich (the PEAK look).
+                    sunRot = Quaternion.Euler(46f, -35f, 0f); sunColor = new Color(1f, 0.92f, 0.78f); sunIntensity = 1.55f;
+                    ambSky = new Color(0.5f, 0.62f, 0.82f); ambEq = new Color(0.52f, 0.54f, 0.52f); ambGround = new Color(0.32f, 0.29f, 0.25f);
                     fog = new Color(0.78f, 0.87f, 0.96f); fogDensity = 0.00022f; skyTop = new Color(0.36f, 0.58f, 0.9f); skyHorizon = new Color(0.78f, 0.87f, 0.96f);
                     night = 0f; vis = 1f; head = 0f;
                     break;
@@ -92,6 +93,32 @@ namespace Tailed.Game
             VehicleView.Headlights = head;
             SetRain(weather == Weather.Rain);
             _litCar = null; // re-evaluate car lights
+            Grade(tod, weather);
+        }
+
+        /// <summary>
+        /// Colour grade on the scene's global volume: richer saturation and contrast, a warm white
+        /// balance by day (warmer at dusk, cool at night), a little more bloom for lamps and beacons.
+        /// </summary>
+        void Grade(TimeOfDay tod, Weather weather)
+        {
+            var vol = FindAnyObjectByType<UnityEngine.Rendering.Volume>();
+            if (vol == null) return;
+            var profile = vol.profile; // an instance: runtime tweaks never touch the asset
+            T Get<T>() where T : UnityEngine.Rendering.VolumeComponent => profile.TryGet<T>(out var c) ? c : profile.Add<T>(true);
+            var ca = Get<UnityEngine.Rendering.Universal.ColorAdjustments>();
+            var wb = Get<UnityEngine.Rendering.Universal.WhiteBalance>();
+            var bloom = Get<UnityEngine.Rendering.Universal.Bloom>();
+            bool rain = weather == Weather.Rain;
+            float sat = tod == TimeOfDay.Night ? 5f : tod == TimeOfDay.Dusk ? 12f : 14f;
+            ca.saturation.Override(rain ? sat - 12f : sat);
+            ca.contrast.Override(tod == TimeOfDay.Night ? 8f : 12f);
+            ca.postExposure.Override(tod == TimeOfDay.Night ? 0.25f : tod == TimeOfDay.Dusk ? 0.05f : 0.1f);
+            wb.temperature.Override(tod == TimeOfDay.Night ? -12f : tod == TimeOfDay.Dusk ? 18f : rain ? -4f : 7f);
+            wb.tint.Override(tod == TimeOfDay.Dusk ? 6f : 0f);
+            bloom.intensity.Override(tod == TimeOfDay.Night ? 0.7f : 0.35f);
+            bloom.threshold.Override(0.95f);
+            bloom.scatter.Override(0.6f);
         }
 
         void SetRain(bool on)

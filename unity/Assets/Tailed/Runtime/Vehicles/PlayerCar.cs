@@ -101,6 +101,7 @@ namespace Tailed.Vehicles
             if (_plateFilter.sharedMesh != null) Destroy(_plateFilter.sharedMesh);
             _plateFilter.sharedMesh = Glyphs.PlateMesh(identity.Plate, Shape.FrontPlate, Shape.RearPlate);
             Eye.localPosition = Shape.Eye;
+            CockpitRig.Build(this);
 
             var box = GetComponent<BoxCollider>();
             float bottom = Shape.Clearance + 0.12f; // clears kerbs

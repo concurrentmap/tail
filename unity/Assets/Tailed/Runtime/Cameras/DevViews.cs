@@ -29,6 +29,21 @@ namespace Tailed.Cameras
             if (kb.f12Key.wasPressedThisFrame && Tailed.Net.NetSession.Instance == null) TownBuilder.NextSeed();
         }
 
+        /// <summary>Vertex counts of the town's combined meshes.</summary>
+        public static string MeshStats()
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (Transform c in TownBuilder.Instance.transform)
+            {
+                int v = 0, n = 0;
+                foreach (var mf in c.GetComponentsInChildren<MeshFilter>()) if (mf.sharedMesh != null) { v += mf.sharedMesh.vertexCount; n++; }
+                if (n > 0) sb.Append($"{c.name}={v / 1000}k/{n} ");
+            }
+            foreach (var k in new[] { "House_Bungalow", "House_TwoStorey", "Fence", "FenceBoard", "Hedge", "Tree_Round", "Tree_Pine", "Flowerbed", "Bins" })
+                sb.Append($"| {k}={Tailed.Map.ArtKit.Get(k)?.vertexCount} ");
+            return sb.ToString();
+        }
+
         /// <summary>Frame counter / timing probe for automated checks.</summary>
         public static string Stats()
         {
@@ -530,6 +545,138 @@ namespace Tailed.Cameras
             var stop = new Vector3(site.X, 20f, site.Y);
             var from = car.transform.position + Vector3.up * 25f - (stop - car.transform.position).normalized * 30f;
             return Place(from, stop, 60f) + $" towards stop {i + 1}";
+        }
+
+        static GameObject _parade;
+        /// <summary>A row of 12 randomly dressed drivers facing the camera (character kit check).</summary>
+        public static string DriverParade()
+        {
+            if (_parade != null) Object.Destroy(_parade);
+            _parade = new GameObject("DriverParade");
+            var ids = new Tailed.Core.Identity.IdentityService((ulong)Random.Range(1, 99999));
+            var at = new Vector3(-150f, 0.2f, 140f);
+            for (int i = 0; i < 12; i++)
+            {
+                var go = new GameObject("Driver");
+                go.transform.SetParent(_parade.transform, false);
+                go.transform.position = at + Vector3.right * (i - 5.5f) * 0.62f;
+                go.transform.rotation = Quaternion.Euler(0f, 180f, 0f); // face -z, towards the camera
+                go.AddComponent<MeshFilter>().sharedMesh = Tailed.Vehicles.VehicleMeshFactory.Driver(ids.RandomCar());
+                go.AddComponent<MeshRenderer>().sharedMaterial = Tailed.Vehicles.VehicleMaterials.Driver;
+            }
+            return Place(at + new Vector3(0f, 0.6f, -5.2f), at + Vector3.up * 0.45f, 42f);
+        }
+
+        static int _poiTour;
+        /// <summary>Visit one business of each type in turn, viewed from across the street.</summary>
+        public static string PoiTour()
+        {
+            var t = TownBuilder.Instance;
+            var types = t.Network.Pois.Select(p => p.Type).Distinct().OrderBy(x => x).ToList();
+            var type = types[_poiTour++ % types.Count];
+            var poi = t.Network.Pois.First(p => p.Type == type);
+            var site = t.Lanes.Sites[poi.Id];
+            var front = site.Centre + site.Inward * 9f;
+            var eye = site.Centre - site.Inward * 22f + site.Inward.PerpLeft * 12f;
+            return Place(new Vector3(eye.X, 7f, eye.Y), new Vector3(front.X, 3.5f, front.Y) + new Vector3(site.Inward.X, 0f, site.Inward.Y) * -2f, 60f) + $" {type} ({poi.Name})";
+        }
+
+        static int _poiClose;
+        /// <summary>Close three-quarter view of one business of each type (cycles).</summary>
+        public static string PoiClose()
+        {
+            var t = TownBuilder.Instance;
+            var types = t.Network.Pois.Select(p => p.Type).Distinct().OrderBy(x => x).ToList();
+            var type = types[_poiClose++ % types.Count];
+            var poi = t.Network.Pois.First(p => p.Type == type);
+            var site = t.Lanes.Sites[poi.Id];
+            var front = site.Centre + site.Inward * 9f;
+            var eye = front - site.Inward * 16f + site.Inward.PerpLeft * 11f;
+            return Place(new Vector3(eye.X, 5f, eye.Y), new Vector3(front.X, 3f, front.Y) + new Vector3(site.Inward.X, 0f, site.Inward.Y) * 3f, 65f) + $" {type}";
+        }
+
+        public static string SteerLeft() { Tailed.Vehicles.CockpitRig.DebugSteer = -1f; return Cockpit() + " steer left"; }
+        public static string SteerRight() { Tailed.Vehicles.CockpitRig.DebugSteer = 0.5f; return Cockpit() + " steer half right"; }
+        public static string SteerStraight() { Tailed.Vehicles.CockpitRig.DebugSteer = 0f; Tailed.Cockpit.CameraDirector.DebugLook = new Vector2(0f, 8f); Tailed.Cockpit.CameraDirector.DebugZoom = 1f; return Cockpit() + " straight"; }
+        public static string LookFootwell() { Tailed.Cockpit.CameraDirector.DebugLook = new Vector2(0f, 55f); Tailed.Cockpit.CameraDirector.DebugZoom = 1f; return Cockpit(); }
+        public static string LookPassenger() { Tailed.Cockpit.CameraDirector.DebugLook = new Vector2(65f, 35f); Tailed.Cockpit.CameraDirector.DebugZoom = 1f; return Cockpit(); }
+        public static string LookRearSeats() { Tailed.Cockpit.CameraDirector.DebugLook = new Vector2(170f, 18f); Tailed.Cockpit.CameraDirector.DebugZoom = 1f; return Cockpit(); }
+        public static string SteerNone() { Tailed.Vehicles.CockpitRig.DebugSteer = null; Tailed.Vehicles.CockpitRig.DebugHorn = false; return Cockpit(); }
+        public static string HornHold() { Tailed.Vehicles.CockpitRig.DebugHorn = true; return Cockpit() + " horn"; }
+        /// <summary>Cockpit, looking down at the wheel and dash.</summary>
+        public static string LookDash() { Tailed.Cockpit.CameraDirector.DebugLook = new Vector2(0f, 22f); Tailed.Cockpit.CameraDirector.DebugZoom = 1f; return Cockpit(); }
+
+        static int _street;
+        /// <summary>Cycle through suburb blocks: (centre, one street-side corner pair).</summary>
+        static (Vector3 centre, Vector3 a, Vector3 b) NextSuburb()
+        {
+            var net = TownBuilder.Instance.Network;
+            var cells = net.Cells.FindAll(c => c.District == Tailed.Core.Roads.District.Suburb);
+            var cell = cells[(_street++ * 7) % cells.Count];
+            Vector3 P(int k) { var v = net.Nodes[cell.Corners[k % 4]].Position; return new Vector3(v.X, 0f, v.Y); }
+            var centre = (P(0) + P(1) + P(2) + P(3)) * 0.25f;
+            return (centre, P(_street % 4), P(_street % 4 + 1));
+        }
+
+        /// <summary>Eye-level view along a suburban street (cycles blocks).</summary>
+        public static string HouseStreet()
+        {
+            var (centre, a, b) = NextSuburb();
+            var mid = Vector3.Lerp(a, b, 0.5f);
+            var inward = (centre - mid).normalized;
+            var along = (b - a).normalized;
+            var eye = Vector3.Lerp(a, b, 0.15f) + inward * 3f + Vector3.up * 2.2f;
+            return Place(eye, mid + inward * 16f + Vector3.up * 2f, 60f);
+        }
+
+        /// <summary>High view over a suburb block.</summary>
+        public static string SuburbHigh()
+        {
+            var (centre, a, b) = NextSuburb();
+            var mid = Vector3.Lerp(a, b, 0.5f);
+            var eye = mid + (mid - centre).normalized * 20f + (b - a).normalized * 25f + Vector3.up * 26f;
+            return Place(eye, Vector3.Lerp(mid, centre, 0.35f), 60f);
+        }
+
+        /// <summary>Straight down onto a diner's bay row (wheel stops, lot dressing).</summary>
+        public static string BaysTop()
+        {
+            var t = TownBuilder.Instance;
+            var poi = t.Network.Pois.First(p => p.Type == Tailed.Core.Roads.PoiType.Diner);
+            var c = t.Lanes.Sites[poi.Id].Centre;
+            return Place(new Vector3(c.X, 45f, c.Y) + Vector3.forward * 0.01f, new Vector3(c.X, 0f, c.Y), 60f);
+        }
+
+        static int _carLow;
+        /// <summary>Low three-quarter look at a parked car (bodywork below the belt line, underside).</summary>
+        public static string CarLow()
+        {
+            var parked = GameObject.Find("ParkedCars");
+            var car = parked.transform.GetChild((_carLow++ * 11) % parked.transform.childCount);
+            var mr = car.GetComponentInChildren<MeshRenderer>();
+            var c = mr.bounds.center;
+            var t = mr.transform;
+            var ground = mr.bounds.min.y;
+            var p = c + t.right * 4.6f + t.forward * 3.2f;
+            p.y = ground + 0.3f;
+            return Place(p, new Vector3(c.x, ground + 0.45f, c.z), 55f);
+        }
+
+        /// <summary>Above a junction where an NPC is mid-turn (left/right), looking down at it.</summary>
+        public static string WatchTurn()
+        {
+            var sim = TrafficRunner.Instance.Sim;
+            foreach (var v in sim.Vehicles)
+            {
+                if (!v.Alive || v.IsExternal || v.Mode != Tailed.Core.Traffic.VehicleMode.Connector) continue;
+                var con = sim.Graph.Connectors[v.Connector];
+                if (con.Turn != Tailed.Core.Roads.TurnType.Left && con.Turn != Tailed.Core.Roads.TurnType.Right) continue;
+                if (v.S > con.Length * 0.4f) continue;
+                var node = sim.Graph.Network.Nodes[con.NodeId].Position;
+                var c = new Vector3(node.X, 0f, node.Y);
+                return Place(c + new Vector3(10f, 22f, -10f), c, 50f) + $" {con.Turn} v{v.Id} speed={v.Speed:0.0} profile={v.Profile.Type} tsf={v.Profile.TurnSpeedFactor:0.00} line={v.Profile.TurnLine:0.00}";
+            }
+            return "no turning vehicle";
         }
 
         public static string TimeScale3() { Time.timeScale = 3f; return "x3"; }

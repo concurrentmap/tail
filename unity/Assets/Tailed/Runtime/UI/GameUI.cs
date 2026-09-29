@@ -371,7 +371,10 @@ namespace Tailed.UI
             var driverImg = UiKit.Rect(card.transform, "Driver", new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(520, -62), new Vector2(270, 270)).gameObject.AddComponent<RawImage>();
             driverImg.texture = _portraits.driver;
             var model = VehicleCatalog.Models[id.ModelId];
-            string hat = (HatType)id.Hat == HatType.None ? "driver: no hat" : $"driver in a {VehicleCatalog.Colors[id.HatColorId].Name.ToLower()} {HatName((HatType)id.Hat)}";
+            var looks = new List<string> { $"{VehicleCatalog.Colors[id.ShirtColorId % VehicleCatalog.Colors.Length].Name.ToLower()} top" };
+            if ((HatType)id.Hat != HatType.None) looks.Add($"{VehicleCatalog.Colors[id.HatColorId].Name.ToLower()} {HatName((HatType)id.Hat)}");
+            if ((GlassesType)id.Glasses != GlassesType.None) looks.Add(((GlassesType)id.Glasses) switch { GlassesType.Sunglasses => "sunglasses", GlassesType.Chunky => "chunky glasses", _ => "round glasses" });
+            string hat = "driver: " + string.Join(", ", looks);
             UiKit.LabelAt(card.transform, $"<b>{VehicleCatalog.Colors[id.ColorId].Name} {model.FullName}</b>  ·  {hat}", 28, Color.white,
                 new Vector2(0f, 0f), new Vector2(20, 76), new Vector2(780, 44));
             UiKit.LabelAt(card.transform, $"PLATE  <b>{PlateFormat.Display(id.Plate)}</b>", 40, UiKit.Accent, new Vector2(0f, 0f), new Vector2(20, 18), new Vector2(780, 56));
@@ -381,7 +384,7 @@ namespace Tailed.UI
         static string HatName(HatType h) => h switch
         {
             HatType.Cap => "cap", HatType.Beanie => "beanie", HatType.TopHat => "top hat", HatType.Cowboy => "cowboy hat",
-            HatType.Party => "party hat", HatType.Crown => "crown", _ => "hat",
+            HatType.Party => "party hat", HatType.Crown => "crown", HatType.Bucket => "bucket hat", HatType.Headband => "headband", _ => "hat",
         };
 
         void BuildPickup()

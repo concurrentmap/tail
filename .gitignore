@@ -24,3 +24,6 @@ obj/
 
 # Outputs
 /out/
+
+# Python (Blender scripts)
+__pycache__/

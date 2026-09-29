@@ -55,6 +55,7 @@ namespace Tailed.Map
             Lanes = LaneGraph.Build(Network);
             _poiByCell = new Dictionary<int, Poi>();
             _parked.Clear();
+            _poiRoot = null;
             PolePositions.Clear();
             OldFarPoles.Clear();
             foreach (var poi in Network.Pois) _poiByCell[poi.CellIndex] = poi;
@@ -68,6 +69,9 @@ namespace Tailed.Map
             var lamps = new MeshBuilder();
             var lampRecords = new List<SignalLamps.Lamp>();
             var signs = new SignBuilder();
+            _houses = new MeshBuilder();
+            _solids = new MeshBuilder();
+            _yard = new MeshBuilder();
 
             BuildGround(ground);
             BuildOutskirts(blocks, nature);
@@ -89,8 +93,14 @@ namespace Tailed.Map
             Emit("Blocks", blocks, castShadows: false);
             Emit("Markings", markings, castShadows: false);
             Emit("Buildings", buildings, castShadows: true);
-            Emit("Nature", nature, castShadows: true);
-            Emit("Props", props, castShadows: true);
+            EmitTiled("Nature", nature, FoliageMaterial, 120f, 0f);
+            EmitTiled("Props", props, ToonMaterial, 120f, 0.08f);
+            EmitTiled("Houses", _houses, ToonMaterial, 120f, 0f);
+            // Yard clutter is small: finer tiles that drop out beyond ~250 m (less at a wide FOV).
+            EmitTiled("Yards", _yard, ToonMaterial, 60f, 0.2f);
+            var solids = new GameObject("HouseSolids") { isStatic = true, layer = Layers.Buildings };
+            solids.transform.SetParent(transform, false);
+            solids.AddComponent<MeshCollider>().sharedMesh = _solids.Build("HouseSolids");
             var lampGo = Emit("SignalLamps", lamps, castShadows: false);
             lampGo.GetComponent<MeshRenderer>().sharedMaterial = DebugMaterial; // unlit vertex colour = glowing lamps
             // Lamp colours change at runtime: static batching would bake a copy and freeze them.
@@ -115,6 +125,9 @@ namespace Tailed.Map
             Built?.Invoke(this);
         }
 
+        /// <summary>Kit houses (rendered, no collider), their collision boxes (collider only) and yard dressing.</summary>
+        MeshBuilder _houses, _solids, _yard;
+
         Material _foliage;
         /// <summary>Toon with wind sway, for trees.</summary>
         Material FoliageMaterial
@@ -125,6 +138,32 @@ namespace Tailed.Map
                 _foliage = new Material(ToonMaterial) { name = "Foliage" };
                 _foliage.SetFloat("_Wind", 1f);
                 return _foliage;
+            }
+        }
+
+        /// <summary>
+        /// Render-only geometry split into ground tiles (see MeshBuilder.BuildTiles) so cameras, mirrors
+        /// and shadow cascades cull what they can't see. <paramref name="cullHeight"/> &gt; 0 hides a tile
+        /// once it's smaller than that fraction of the screen. The CPU copy is released after upload.
+        /// </summary>
+        void EmitTiled(string name, MeshBuilder mb, Material material, float tile, float cullHeight)
+        {
+            var root = new GameObject(name) { isStatic = true };
+            root.transform.SetParent(transform, false);
+            foreach (var mesh in mb.BuildTiles(name, tile))
+            {
+                var go = new GameObject(name + "Tile") { isStatic = true };
+                go.transform.SetParent(root.transform, false);
+                go.AddComponent<MeshFilter>().sharedMesh = mesh;
+                var mr = go.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = material;
+                mesh.UploadMeshData(true);
+                if (cullHeight > 0f)
+                {
+                    var lod = go.AddComponent<LODGroup>();
+                    lod.SetLODs(new[] { new LOD(cullHeight, new Renderer[] { mr }) });
+                    lod.RecalculateBounds();
+                }
             }
         }
 
@@ -169,6 +208,12 @@ namespace Tailed.Map
             }
 
             var style = PoiStyle(poi.Type);
+            if (BuildPoiArt(poi, site, style, signs))
+            {
+                PoiRoadSign(poi, site, style, buildings, signs);
+                if (ArtKit.Available) LotDressing(poi, site, cell, ref rng, blocks, buildings, markings);
+                return;
+            }
             float depth = poi.Type == PoiType.Warehouse || poi.Type == PoiType.Depot ? 22f : 12f;
             float width = poi.Type == PoiType.Motel ? 34f : 22f;
             float height = poi.Type == PoiType.Motel ? 7f : poi.Type == PoiType.Warehouse || poi.Type == PoiType.Depot ? 9f : 5f;
@@ -192,7 +237,114 @@ namespace Tailed.Map
                     buildings.Box(cc + along * (len * t) + inward * d, inward, 0.35f, 0.35f, 0f, 4.6f, Palette.Pole, Palette.Pole);
             }
 
-            // Tall sign by the road with the business name in the pixel font.
+            PoiRoadSign(poi, site, style, buildings, signs);
+            signs.Text(poi.Name, MeshBuilder.V3(shopCentre - inward * (depth * 0.5f + 0.1f), height - 1.4f), MeshBuilder.V3(-inward, 0f), 0.9f, Color.white);
+        }
+
+        /// <summary>Tall sign by the road with the business name.</summary>
+        /// <summary>
+        /// Make a business's lot read as a real car park: a kerbed sidewalk and planting strip on the
+        /// sides away from the entrance, lamp standards, wheel stops, planter islands at the ends of the
+        /// bay row, an overflow row of painted spaces (some taken) and bins out the back.
+        /// </summary>
+        void LotDressing(Poi poi, PoiSite site, Cell cell, ref Rng rng, MeshBuilder blocks, MeshBuilder buildings, MeshBuilder markings)
+        {
+            Vec2 inward = site.Inward, along = inward.PerpLeft;
+            var building = Resources.Load<Mesh>("Art/Pois/Poi_" + poi.Type);
+            float depth = building != null ? -building.bounds.min.z : 12f;
+            float halfW = building != null ? Mathf.Max(-building.bounds.min.x, building.bounds.max.x) : 11f;
+            float bayExt = site.Bays.Count * LaneGraph.BaySpacing * 0.5f;
+            var none = new ArtKit.Swap { Leaf = Palette.Pick(Palette.Foliage, ref rng) };
+            bool shop = poi.Type != PoiType.Warehouse && poi.Type != PoiType.Depot && poi.Type != PoiType.ScrapYard && poi.Type != PoiType.ChopShop;
+
+            // Lot extent along the frontage and into the block, relative to the forecourt centre.
+            var q0 = CellPolygon(cell, 0f);
+            float aMin = float.MaxValue, aMax = float.MinValue, iMax = float.MinValue;
+            foreach (var c in q0)
+            {
+                float a = Vec2.Dot(c - site.Centre, along), i = Vec2.Dot(c - site.Centre, inward);
+                aMin = Mathf.Min(aMin, a); aMax = Mathf.Max(aMax, a); iMax = Mathf.Max(iMax, i);
+            }
+
+            // Sidewalk + planting strip on every side but the entrance.
+            var q1 = CellPolygon(cell, RoadSpec.SidewalkWidth);
+            var q2 = CellPolygon(cell, RoadSpec.SidewalkWidth + 3f);
+            for (int k = 0; k < 4; k++)
+            {
+                Vec2 p = q0[k], r = q0[(k + 1) % 4];
+                Vec2 dir = (r - p).Normalized;
+                if (Vec2.Dot(dir.PerpLeft, inward) > 0.7f) continue; // the entrance side stays open
+                float trim = 7f;
+                Vec2 a0 = q0[k] + dir * trim, a1 = q0[(k + 1) % 4] - dir * trim;
+                Vec2 b0 = q1[k] + dir * trim, b1 = q1[(k + 1) % 4] - dir * trim;
+                Vec2 c0 = q2[k] + dir * trim, c1 = q2[(k + 1) % 4] - dir * trim;
+                blocks.Extrude(new[] { a0, a1, b1, b0 }, 0f, KerbHeight, Palette.Kerb, Palette.Sidewalk);
+                blocks.Extrude(new[] { b0, b1, c1, c0 }, 0f, KerbHeight + 0.05f, Palette.Kerb, Palette.Lawn);
+                float len = Vec2.Distance(b0, b1);
+                Vec2 stripIn = dir.PerpLeft;
+                for (float t = 4f; t < len - 3f; t += rng.Range(7f, 11f))
+                {
+                    var at = Vec2.Lerp(b0, b1, t / len) + stripIn * 1.5f;
+                    if (rng.NextDouble() < 0.45) Tree(_yard, at, ref rng, 0.75f);
+                    else ArtKit.Place(_yard, "Bush", at, KerbHeight, stripIn, none, rng.Range(0.8f, 1.3f));
+                }
+                for (float t = 12f; t < len - 8f; t += 26f)
+                    ArtKit.Place(buildings, "LotLamp", Vec2.Lerp(c0, c1, t / len) + stripIn * 0.6f, KerbHeight, dir, none);
+            }
+
+            // Planter islands and lamps at either end of the bay row.
+            foreach (float side in new[] { -1f, 1f })
+            {
+                Vec2 end = site.Centre + along * (side * (bayExt + 5f)) + inward * 1.5f;
+                if (Vec2.Dot(end - site.Centre, along) * side < (side > 0 ? aMax : -aMin) - 8f)
+                {
+                    ArtKit.Place(_yard, "Planter", end, 0.01f, inward, none);
+                    ArtKit.Place(buildings, "LotLamp", end + inward * 2.2f, 0.01f, along, none);
+                }
+            }
+
+            if (shop && poi.Type != PoiType.Petrol && poi.Type != PoiType.CarWash && poi.Type != PoiType.RentalLot)
+                foreach (int bi in site.Bays)
+                {
+                    var bay = Lanes.Bays[bi];
+                    ArtKit.Place(_yard, "WheelStop", BayCentre(bay) - bay.Heading * 2.7f, 0.01f, bay.Heading, none);
+                }
+
+            // Overflow parking beside the building: painted perpendicular spaces, some taken.
+            foreach (float side in new[] { -1f, 1f })
+            {
+                float start = Mathf.Max(bayExt + 10f, halfW + 3f), stop = (side > 0 ? aMax : -aMin) - 10f;
+                for (float x = start; x + 2.6f < stop; x += 2.8f)
+                {
+                    Vec2 c = site.Centre + along * (side * x) + inward * (9f + 3.2f);
+                    Vec2 f = inward * 2.6f, r = along * 1.4f;
+                    Strip(markings, c - f - r, c + f - r, 0.13f, Palette.LineWhite, 0.03f);
+                    Strip(markings, c - f + r, c + f + r, 0.13f, Palette.LineWhite, 0.03f);
+                    if (rng.NextDouble() < 0.4)
+                        _parked.Add((HouseholdCar(ref rng), PickColor(ref rng), c + inward * 0.2f, rng.NextDouble() < 0.6 ? inward : -inward));
+                    else if (shop && rng.NextDouble() < 0.12)
+                        ArtKit.Place(_yard, "Corral", c, 0.01f, along, none, 0.55f);
+                }
+            }
+
+            // Out the back: dumpster, pallets; bollards guarding the shop door.
+            Vec2 back = site.Centre + inward * (9f + depth + 2f);
+            if (Vec2.Dot(back - site.Centre, inward) < iMax - 3f)
+            {
+                ArtKit.Place(buildings, "Dumpster", back - along * (halfW * 0.5f), 0.01f, -inward, none);
+                ArtKit.Place(_yard, "Pallets", back + along * (halfW * 0.4f), 0.01f, along, none);
+                if (rng.NextDouble() < 0.5) ArtKit.Place(_yard, "Pallets", back + along * (halfW * 0.4f + 1.5f), 0.01f, -along, none);
+            }
+            if (shop && poi.Type != PoiType.Petrol && poi.Type != PoiType.CarWash && poi.Type != PoiType.RentalLot)
+                foreach (float u in new[] { -2.2f, 2.2f })
+                    ArtKit.Place(buildings, "Bollard", site.Centre + inward * 7.9f + along * u, 0.01f, inward, none);
+            if (shop && rng.NextDouble() < 0.6)
+                ArtKit.Place(_yard, "Bench", site.Centre + inward * 8.1f + along * (halfW * 0.65f), 0.01f, -inward, none);
+        }
+
+        void PoiRoadSign(Poi poi, PoiSite site, Color style, MeshBuilder buildings, SignBuilder signs)
+        {
+            Vec2 inward = site.Inward, along = inward.PerpLeft;
             Vec2 signAt = site.Centre - inward * 3.2f + along * (site.Bays.Count * LaneGraph.BaySpacing * 0.5f + 5f);
             buildings.Box(signAt, inward, 0.3f, 0.3f, 0f, 5.4f, Palette.Pole, Palette.Pole);
             float boardW = Mathf.Max(4f, poi.Name.Length * 0.52f + 1f);
@@ -200,7 +352,122 @@ namespace Tailed.Map
             buildings.Box(signAt, inward, boardW, 0.35f, 5.2f, 6.8f, Palette.SignBoard, Palette.SignBoard);
             foreach (float side in new[] { 1f, -1f })
                 signs.Text(poi.Name, MeshBuilder.V3(signAt, 5.6f) + MeshBuilder.V3(-inward * side, 0f) * 0.19f, MeshBuilder.V3(-inward * side, 0f), 0.62f, style);
-            signs.Text(poi.Name, MeshBuilder.V3(shopCentre - inward * (depth * 0.5f + 0.1f), height - 1.4f), MeshBuilder.V3(-inward, 0f), 0.9f, Color.white);
+        }
+
+        // ---- Blender-built businesses (tools/blender/build_pois.py) --------------------------
+
+        /// <summary>Where each business's name goes on its facade: local (x, y, z) and letter height.</summary>
+        static readonly Dictionary<PoiType, (Vector3 at, float size, Color ink)> FacadeText = new Dictionary<PoiType, (Vector3, float, Color)>
+        {
+            [PoiType.Petrol] = (new Vector3(0f, 3.6f, 0.2f), 0.6f, Color.white),
+            [PoiType.Diner] = (new Vector3(0f, 3.45f, 1.9f), 0.45f, new Color(0.15f, 0.15f, 0.18f)),
+            [PoiType.Laundromat] = (new Vector3(0f, 4.2f, 0.1f), 0.8f, Color.white),
+            [PoiType.CarWash] = (new Vector3(0f, 5.5f, 0.3f), 0.45f, new Color(0.15f, 0.15f, 0.18f)),
+            [PoiType.Pharmacy] = (new Vector3(-2f, 3.95f, 0.15f), 0.6f, Color.white),
+            [PoiType.Bakery] = (new Vector3(0f, 3.85f, 0.1f), 0.5f, Color.white),
+            [PoiType.Florist] = (new Vector3(-5.5f, 3.25f, 0.2f), 0.5f, Color.white),
+            [PoiType.Hardware] = (new Vector3(0f, 5.15f, 0.15f), 0.6f, Color.white),
+            [PoiType.Bank] = (new Vector3(0f, 7.35f, 0.35f), 0.55f, new Color(0.25f, 0.2f, 0.12f)),
+            [PoiType.Motel] = (new Vector3(15f, 8.3f, -0.62f), 0.7f, Color.white),
+            [PoiType.Warehouse] = (new Vector3(0f, 6.0f, 0.1f), 1.0f, Color.white),
+            [PoiType.Depot] = (new Vector3(0f, 5.6f, 0.1f), 0.9f, Color.white),
+            [PoiType.ScrapYard] = (new Vector3(11.5f, 2.8f, 0.1f), 0.45f, Color.white),
+            [PoiType.RentalLot] = (new Vector3(0f, 3.0f, 0.1f), 0.5f, Color.white),
+            [PoiType.ChopShop] = (new Vector3(0f, 5.2f, 0.1f), 0.8f, Color.white),
+        };
+
+        Transform _poiRoot;
+
+        /// <summary>
+        /// Place a business's Blender-built building (if present): front line where the old box's front
+        /// was (the forecourt side), brand colour swapped in, solid, with its name on the facade. Gas
+        /// stations also get a canopy over their bays and pumps between them; rental lots a row of cars.
+        /// </summary>
+        bool BuildPoiArt(Poi poi, PoiSite site, Color style, SignBuilder signs)
+        {
+            var src = Resources.Load<Mesh>("Art/Pois/Poi_" + poi.Type);
+            if (src == null || !src.isReadable) return false;
+            if (_poiRoot == null) { _poiRoot = new GameObject("Businesses").transform; _poiRoot.SetParent(transform, false); }
+            Vec2 inward = site.Inward, along = inward.PerpLeft;
+            // Vary the brand colour a little per site so two diners aren't twins.
+            Color.RGBToHSV(style, out float hh, out float ss, out float vv);
+            var brand = Color.HSVToRGB(Mathf.Repeat(hh + ((poi.Id * 37) % 11 - 5) * 0.012f, 1f), ss, vv);
+            var front = site.Centre + inward * 9f;
+            var rot = Quaternion.LookRotation(MeshBuilder.V3(-inward, 0f), Vector3.up);
+            var origin = MeshBuilder.V3(front, 0f);
+            Place("Poi_" + poi.Type, Recolor(src, brand), origin, rot, Vector3.one, collider: true);
+
+            var text = FacadeText[poi.Type];
+            signs.Text(poi.Name, origin + rot * text.at, rot * Vector3.forward, text.size, text.ink);
+
+            if (poi.Type == PoiType.Petrol)
+            {
+                var canopy = Resources.Load<Mesh>("Art/Pois/Prop_Canopy");
+                var pump = Resources.Load<Mesh>("Art/Pois/Prop_Pump");
+                var column = Resources.Load<Mesh>("Art/Pois/Prop_Column");
+                float len = site.Bays.Count * LaneGraph.BaySpacing + 4f;
+                if (column != null)
+                {
+                    // Canopy columns at both ends and in line with every other pump island (never in a bay).
+                    var colMesh = Recolor(column, brand);
+                    var xs = new List<Vec2> { site.Centre + along * (len * 0.5f - 1f), site.Centre - along * (len * 0.5f - 1f) };
+                    for (int i = 1; i + 1 < site.Bays.Count; i += 2)
+                        xs.Add((BayCentre(Lanes.Bays[site.Bays[i]]) + BayCentre(Lanes.Bays[site.Bays[i + 1]])) * 0.5f);
+                    foreach (var x in xs)
+                        foreach (float zz in new[] { -3.9f, 3.9f })
+                            Place("Column", colMesh, MeshBuilder.V3(x - inward * zz, 0f), rot, Vector3.one, collider: true);
+                }
+                var mid = MeshBuilder.V3(site.Centre, 0f);
+                if (canopy != null) Place("Canopy", Recolor(canopy, brand), mid, rot, new Vector3(len / 10f, 1f, 1f), collider: false);
+                if (pump != null)
+                {
+                    var pumpMesh = Recolor(pump, brand);
+                    for (int i = 0; i + 1 < site.Bays.Count; i++)
+                    {
+                        var a = BayCentre(Lanes.Bays[site.Bays[i]]); var b = BayCentre(Lanes.Bays[site.Bays[i + 1]]);
+                        Place("Pump", pumpMesh, MeshBuilder.V3((a + b) * 0.5f, 0f), rot, Vector3.one, collider: true);
+                    }
+                }
+            }
+            if (poi.Type == PoiType.RentalLot)
+            {
+                // Rental cars lined up between the office and the bays, noses to the office.
+                var rng = new Rng((ulong)Seed * 7717UL + (ulong)poi.Id);
+                for (int k = -3; k <= 3; k++)
+                {
+                    Vec2 at = site.Centre + inward * 4.6f + along * (k * 2.9f);
+                    _parked.Add((HouseholdCar(ref rng), PickColor(ref rng), at, inward));
+                }
+            }
+            return true;
+        }
+
+        static Mesh Recolor(Mesh src, Color brand)
+        {
+            var mesh = Instantiate(src);
+            var cols = mesh.colors;
+            for (int i = 0; i < cols.Length; i++)
+                if (cols[i].r > 0.95f && cols[i].g < 0.05f && cols[i].b > 0.95f) cols[i] = new Color(brand.r, brand.g, brand.b, 1f);
+            mesh.colors = cols;
+            return mesh;
+        }
+
+        void Place(string name, Mesh mesh, Vector3 pos, Quaternion rot, Vector3 scale, bool collider)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(_poiRoot, false);
+            go.transform.SetPositionAndRotation(pos, rot);
+            go.transform.localScale = scale;
+            go.isStatic = true;
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var mr = go.AddComponent<MeshRenderer>();
+            // Submesh 1 (if any) is see-through glass, like the cars'.
+            mr.sharedMaterials = mesh.subMeshCount > 1 ? new[] { ToonMaterial, Tailed.Vehicles.VehicleMaterials.Glass } : new[] { ToonMaterial };
+            if (collider)
+            {
+                go.layer = Layers.Buildings;
+                go.AddComponent<MeshCollider>().sharedMesh = mesh;
+            }
         }
 
         // ---- landmarks ---------------------------------------------------------------
@@ -422,7 +689,7 @@ namespace Tailed.Map
                     else if (t < s.X + s.Y) p = new Vec2(s.X + off, t - s.X);
                     else if (t < 2 * s.X + s.Y) p = new Vec2(2 * s.X + s.Y - t, s.Y + off);
                     else p = new Vec2(-off, perimeter - t);
-                    Tree(nature, p, ref rng, 1.5f);
+                    Tree(nature, p, ref rng, 1.5f, forest: true);
                 }
             }
         }
@@ -576,6 +843,135 @@ namespace Tailed.Map
 
         void Suburb(Cell cell, Vec2[] lot, ref Rng rng, MeshBuilder mb, MeshBuilder nature)
         {
+            if (!ArtKit.Available) { SuburbBoxes(cell, lot, ref rng, mb, nature); return; }
+            for (int k = 0; k < 4; k++)
+            {
+                if (cell.Sides[k] < 0) continue; // no street on this side
+                Vec2 p = lot[k], q = lot[(k + 1) % 4];
+                Vec2 along = (q - p).Normalized, inward = along.PerpLeft;
+                float sideLen = Vec2.Distance(p, q);
+                float depthAvail = Vec2.Distance(q, lot[(k + 2) % 4]);
+                // Leave the corners clear (the perpendicular street's houses live there).
+                int houses = Mathf.Max(2, Mathf.FloorToInt((sideLen - 24f) / 17f));
+                float slot = (sideLen - 24f) / houses;
+                // A street has a character: most of its fences match.
+                var streetFence = rng.NextDouble() < 0.6 ? Palette.FenceWhite : Palette.Pick(Palette.Fences, ref rng);
+                for (int h = 0; h < houses; h++)
+                {
+                    float t = (12f + (h + 0.5f) * slot) / sideLen;
+                    Vec2 edge = Vec2.Lerp(p, q, t);
+                    string name = ArtKit.Houses[rng.NextInt(ArtKit.Houses.Length)];
+                    var b = ArtKit.BoundsOf(name);
+                    bool mirror = rng.NextDouble() < 0.5;
+                    float ms = mirror ? -1f : 1f;
+                    var swap = new ArtKit.Swap
+                    {
+                        Wall = Palette.Pick(Palette.Pastels, ref rng),
+                        Roof = Palette.Pick(Palette.HouseRoofs, ref rng),
+                        Trim = Palette.Pick(Palette.HouseTrims, ref rng),
+                    };
+                    float w = b.size.x, d = b.size.z;
+                    Vec2 front = edge + inward * 5f;
+                    // Local +z faces the street; the front (max z) sits on the building line.
+                    Vec2 origin = front + inward * b.max.z - along * (ms * b.center.x);
+                    ArtKit.Place(_houses, name, origin, LotHeight - 0.02f, -inward, swap, 1f, mirror);
+                    Vec2 mid = origin + along * (ms * b.center.x) - inward * b.center.z;
+                    _solids.Box(mid, inward, w, d, 0f, b.max.y, Color.white, Color.white);
+
+                    float drive = -ms * w * 0.28f; // the kit puts garages on the -x side
+                    if (rng.NextDouble() < 0.5) Tree(nature, edge + along * (ms * (w * 0.5f + 2.5f)) + inward * 3f, ref rng, 0.8f);
+                    bool hasDrive = rng.NextDouble() < 0.6 || name == "House_Ranch" || name == "House_Modern";
+                    if (hasDrive)
+                    {
+                        Vec2 pad = edge + along * drive + inward * 2.6f;
+                        mb.Flat(MeshBuilder.Rect(pad, inward, 2.9f, 5.1f), LotHeight + 0.012f, Palette.Driveway);
+                        if (rng.NextDouble() < 0.8)
+                            _parked.Add((HouseholdCar(ref rng), PickColor(ref rng), pad, rng.NextDouble() < 0.7 ? inward : -inward));
+                    }
+                    else drive = float.NaN;
+                    bool end = h == 0 || h == houses - 1; // corner plots meet the next street's gardens
+                    YardDressing(edge, along, inward, ms, w, d, slot, drive, end ? 0f : depthAvail, streetFence, ref rng, nature);
+                }
+            }
+            for (int i = 0; i < 3; i++) Tree(nature, Bilinear(lot, rng.Range(0.35f, 0.65f), rng.Range(0.35f, 0.65f)), ref rng, 1f);
+        }
+
+        /// <summary>Fence or hedge along the front, a path to the door, mailbox, bins, flowers and a backyard toy or two.</summary>
+        void YardDressing(Vec2 edge, Vec2 along, Vec2 inward, float ms, float w, float d, float slot, float drive,
+                          float depthAvail, Color fence, ref Rng rng, MeshBuilder nature)
+        {
+            var swap = new ArtKit.Swap { Trim = fence, Leaf = Palette.Pick(Palette.Foliage, ref rng) };
+            Vec2 facing = -inward;
+            float gate = ms * rng.Range(0.2f, 1.2f);
+            // Front path from the gate to the house.
+            _yard.Flat(MeshBuilder.Rect(edge + along * gate + inward * 2.5f, inward, 1.1f, 5f), LotHeight + 0.01f, Palette.Path);
+
+            double style = rng.NextDouble();
+            if (style < 0.65)
+            {
+                string piece = style < 0.45 ? "Fence" : "Hedge";
+                var cuts = new List<(float a, float b)> { (gate - 0.8f, gate + 0.8f) };
+                if (!float.IsNaN(drive)) cuts.Add((drive - 1.9f, drive + 1.9f));
+                cuts.Sort((x, y) => x.a.CompareTo(y.a));
+                float from = -slot * 0.5f + 0.4f, to = slot * 0.5f - 0.4f, cursor = from;
+                var runs = new List<(float a, float b)>();
+                foreach (var c in cuts) { if (c.a > cursor) runs.Add((cursor, Mathf.Min(c.a, to))); cursor = Mathf.Max(cursor, c.b); }
+                if (cursor < to) runs.Add((cursor, to));
+                foreach (var (a, b) in runs)
+                    if (b - a >= 1.2f)
+                        FenceRun(piece == "Hedge" ? nature : _yard, piece, edge + along * a + inward * (piece == "Hedge" ? 0.8f : 0.4f),
+                                 edge + along * b + inward * (piece == "Hedge" ? 0.8f : 0.4f), fence, swap.Leaf);
+            }
+            if (!float.IsNaN(drive) && rng.NextDouble() < 0.75)
+                ArtKit.Place(_yard, "Mailbox", edge + along * (drive + ms * 2.1f) + inward * 0.35f, LotHeight, facing,
+                             new ArtKit.Swap { Trim = Palette.Pick(Palette.Mailboxes, ref rng) });
+            if (rng.NextDouble() < 0.55)
+                ArtKit.Place(_yard, "Bins", edge + along * (-ms * (w * 0.5f + 1.0f)) + inward * 6.5f, LotHeight, facing, swap);
+            if (rng.NextDouble() < 0.5)
+            {
+                var bed = edge + along * (ms * w * 0.25f) + inward * 3.4f;
+                ArtKit.Place(_yard, "Flowerbed", bed, LotHeight, facing, swap);
+                if (rng.NextDouble() < 0.3) ArtKit.Place(_yard, "Gnome", bed + along * 1.9f, LotHeight, facing, swap);
+            }
+            else if (rng.NextDouble() < 0.5) ArtKit.Place(nature, "Bush", edge + along * (ms * w * 0.3f) + inward * 3.4f, LotHeight, facing, swap, rng.Range(0.8f, 1.2f));
+            // Back garden: board fences to the back and one side, a tree, a toy or two. Needs a block deep
+            // enough that it won't meet the gardens of the street behind (depthAvail 0 = skip).
+            float backLine = Mathf.Min(5f + d + 10f, depthAvail * 0.5f - 0.6f);
+            if (backLine < 5f + d + 4f || rng.NextDouble() < 0.4) return; // not every garden is fenced (or has toys)
+            var stain = Palette.Pick(Palette.Stains, ref rng);
+            FenceRun(_yard, "FenceBoard", edge + along * (-slot * 0.5f) + inward * backLine, edge + along * (slot * 0.5f) + inward * backLine, stain, swap.Leaf);
+            FenceRun(_yard, "FenceBoard", edge + along * (slot * 0.5f) + inward * (5f + d * 0.6f), edge + along * (slot * 0.5f) + inward * backLine, stain, swap.Leaf);
+            if (rng.NextDouble() < 0.6) Tree(nature, edge + along * rng.Range(-slot * 0.35f, slot * 0.35f) + inward * (backLine - 2.5f), ref rng, 0.9f);
+            int toys = rng.NextInt(3);
+            for (int i = 0; i < toys; i++)
+            {
+                string toy = ArtKit.Backyard[rng.NextInt(ArtKit.Backyard.Length)];
+                var at = edge + along * rng.Range(-w * 0.4f, w * 0.4f) + inward * rng.Range(5f + d + 2.2f, backLine - 2f);
+                var toySwap = new ArtKit.Swap { Wall = Palette.Pick(Palette.Pastels, ref rng), Roof = Palette.Pick(Palette.HouseRoofs, ref rng), Trim = Palette.Pick(Palette.Pastels, ref rng) };
+                ArtKit.Place(_yard, toy, at, LotHeight, rng.NextDouble() < 0.5 ? facing : along, toySwap);
+            }
+        }
+
+        /// <summary>A straight run of fence/hedge from a to b: 4 m kit pieces, stretched to fit exactly.</summary>
+        static void FenceRun(MeshBuilder mb, string piece, Vec2 a, Vec2 b, Color trim, Color leaf)
+        {
+            var mesh = ArtKit.Get(piece);
+            float len = Vec2.Distance(a, b);
+            if (mesh == null || len < 0.5f) return;
+            Vec2 dir = (b - a) / len;
+            int n = Mathf.CeilToInt(len / 4f);
+            var rot = Quaternion.LookRotation(MeshBuilder.V3(dir.PerpLeft, 0f));
+            Color t = trim.linear, l = leaf.linear, l2 = (leaf * 0.8f).linear;
+            for (int i = 0; i < n; i++)
+            {
+                var m = Matrix4x4.TRS(MeshBuilder.V3(a + dir * ((i + 0.5f) * len / n), LotHeight - 0.02f), rot, new Vector3(len / n / 4f, 1f, 1f));
+                mb.Append(mesh, m, c => ArtKit.Recolor(c, t, l, l2));
+            }
+        }
+
+        /// <summary>Fallback when the art kit isn't imported: plain gable boxes.</summary>
+        void SuburbBoxes(Cell cell, Vec2[] lot, ref Rng rng, MeshBuilder mb, MeshBuilder nature)
+        {
             for (int k = 0; k < 4; k++)
             {
                 if (cell.Sides[k] < 0) continue; // no street on this side
@@ -721,11 +1117,18 @@ namespace Tailed.Map
             }
         }
 
-        static void Tree(MeshBuilder mb, Vec2 at, ref Rng rng, float scale)
+        static void Tree(MeshBuilder mb, Vec2 at, ref Rng rng, float scale, bool forest = false)
         {
             scale *= rng.Range(0.8f, 1.25f);
-            var basePos = MeshBuilder.V3(at, LotHeight);
             var leaf = Palette.Pick(Palette.Foliage, ref rng);
+            leaf = Color.Lerp(leaf, new Color(0.55f, 0.72f, 0.3f), rng.Range(0f, 0.35f));
+            string kind;
+            double r = rng.NextDouble();
+            if (forest) kind = r < 0.75 ? "Tree_Pine" : r < 0.9 ? "Tree_Round" : "Tree_Oak";
+            else kind = r < 0.32 ? "Tree_Round" : r < 0.52 ? "Tree_Oak" : r < 0.66 ? "Tree_Pine" : r < 0.86 ? "Tree_Poplar" : "Tree_Blossom";
+            float a = rng.Range(0f, Mathf.PI * 2f);
+            if (ArtKit.Place(mb, kind, at, LotHeight - 0.05f, new Vec2(Mathf.Cos(a), Mathf.Sin(a)), new ArtKit.Swap { Leaf = leaf }, scale)) return;
+            var basePos = MeshBuilder.V3(at, LotHeight);
             mb.Cylinder(basePos, 0.25f * scale, 0.2f * scale, 2f * scale, 5, Palette.Trunk);
             mb.Cylinder(basePos + Vector3.up * 1.6f * scale, 2.2f * scale, 0f, 3.2f * scale, 7, leaf);
             mb.Cylinder(basePos + Vector3.up * 3.2f * scale, 1.6f * scale, 0f, 2.6f * scale, 7, leaf);
@@ -972,13 +1375,23 @@ namespace Tailed.Map
         public static readonly Color[] HouseRoofs =
         {
             new Color(0.75f, 0.33f, 0.28f), new Color(0.35f, 0.40f, 0.50f), new Color(0.50f, 0.35f, 0.25f),
-            new Color(0.30f, 0.55f, 0.58f),
+            new Color(0.30f, 0.55f, 0.58f), new Color(0.25f, 0.27f, 0.3f), new Color(0.62f, 0.5f, 0.38f),
         };
         public static readonly Color[] Warehouses =
         {
             new Color(0.62f, 0.68f, 0.74f), new Color(0.75f, 0.72f, 0.62f), new Color(0.70f, 0.45f, 0.35f),
             new Color(0.55f, 0.62f, 0.55f),
         };
+        public static readonly Color[] HouseTrims =
+        {
+            new Color(0.97f, 0.96f, 0.93f), new Color(0.2f, 0.28f, 0.45f), new Color(0.2f, 0.42f, 0.3f), new Color(0.7f, 0.2f, 0.2f),
+            new Color(0.18f, 0.18f, 0.2f), new Color(0.25f, 0.55f, 0.58f), new Color(0.95f, 0.75f, 0.3f),
+        };
+        public static readonly Color FenceWhite = new Color(0.97f, 0.96f, 0.93f);
+        public static readonly Color[] Fences = { new Color(0.62f, 0.45f, 0.3f), new Color(0.45f, 0.62f, 0.72f), new Color(0.35f, 0.3f, 0.28f) };
+        public static readonly Color[] Mailboxes = { new Color(0.2f, 0.2f, 0.22f), new Color(0.9f, 0.9f, 0.88f), new Color(0.25f, 0.45f, 0.8f), new Color(0.75f, 0.2f, 0.2f) };
+        public static readonly Color Path = new Color(0.8f, 0.76f, 0.7f);
+        public static readonly Color[] Stains = { new Color(0.55f, 0.38f, 0.24f), new Color(0.45f, 0.33f, 0.25f), new Color(0.62f, 0.5f, 0.36f), new Color(0.5f, 0.5f, 0.48f) };
         public static readonly Color[] Foliage =
         {
             new Color(0.30f, 0.62f, 0.30f), new Color(0.42f, 0.70f, 0.30f), new Color(0.25f, 0.52f, 0.35f),

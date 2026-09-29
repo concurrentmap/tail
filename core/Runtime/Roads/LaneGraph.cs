@@ -227,21 +227,42 @@ namespace Tailed.Core.Roads
             return pts;
         }
 
-        /// <summary>Point and unit tangent at arc length <paramref name="s"/> along a sampled path.</summary>
+        /// <summary>
+        /// Point and unit tangent at arc length <paramref name="s"/> along a sampled path. Between samples
+        /// it follows a Hermite curve through them (tangents averaged at each sample), so position and
+        /// heading change smoothly instead of turning in steps at every sample.
+        /// </summary>
         public static Vec2 PathPoint(Vec2[] pts, float s, out Vec2 tangent)
         {
-            for (int i = 0; i + 1 < pts.Length; i++)
+            int n = pts.Length;
+            for (int i = 0; i + 1 < n; i++)
             {
                 float seg = Vec2.Distance(pts[i], pts[i + 1]);
-                if (s <= seg || i + 2 == pts.Length)
+                if (s <= seg || i + 2 == n)
                 {
-                    tangent = (pts[i + 1] - pts[i]).Normalized;
-                    return Vec2.Lerp(pts[i], pts[i + 1], seg > 1e-5f ? Math.Min(1f, s / seg) : 0f);
+                    if (seg <= 1e-5f) { tangent = SampleTangent(pts, i); return pts[i]; }
+                    if (s < 0f) { tangent = (pts[i + 1] - pts[i]) / seg; return pts[i] + tangent * s; } // before the start: straight on
+                    float f = Math.Min(1f, s / seg);
+                    Vec2 p0 = pts[i], p1 = pts[i + 1], m0 = SampleTangent(pts, i) * seg, m1 = SampleTangent(pts, i + 1) * seg;
+                    float f2 = f * f, f3 = f2 * f;
+                    var d = (p0 * (6f * f2 - 6f * f) + m0 * (3f * f2 - 4f * f + 1f) + p1 * (-6f * f2 + 6f * f) + m1 * (3f * f2 - 2f * f));
+                    tangent = d.Length > 1e-6f ? d.Normalized : (p1 - p0) / seg;
+                    return p0 * (2f * f3 - 3f * f2 + 1f) + m0 * (f3 - 2f * f2 + f) + p1 * (-2f * f3 + 3f * f2) + m1 * (f3 - f2);
                 }
                 s -= seg;
             }
             tangent = new Vec2(1, 0);
-            return pts[pts.Length - 1];
+            return pts[n - 1];
+        }
+
+        /// <summary>Unit tangent at sample <paramref name="i"/>: the average of the segments either side.</summary>
+        static Vec2 SampleTangent(Vec2[] pts, int i)
+        {
+            int n = pts.Length;
+            Vec2 a = i > 0 ? (pts[i] - pts[i - 1]) : (pts[1] - pts[0]);
+            Vec2 b = i + 1 < n ? (pts[i + 1] - pts[i]) : (pts[n - 1] - pts[n - 2]);
+            var t = a.Normalized + b.Normalized;
+            return t.Length > 1e-6f ? t.Normalized : b.Normalized;
         }
 
         /// <summary>Connector from <paramref name="laneId"/> onto <paramref name="edgeId"/>, or -1.</summary>

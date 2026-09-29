@@ -33,6 +33,14 @@ namespace Tailed.Core.Traffic
         public float StopShort;
         /// <summary>Chance of U-turning instead of going round the block after missing a stop.</summary>
         public float UTurnChance;
+        /// <summary>Turn speed relative to the standard one for that turn.</summary>
+        public float TurnSpeedFactor;
+        /// <summary>Line through a turn (m): positive cuts the corner, negative swings wide.</summary>
+        public float TurnLine;
+        /// <summary>How far before the corner they're down to turn speed (m): early braker vs late.</summary>
+        public float TurnBrakeLead;
+        /// <summary>How quickly the throttle builds (m/s³): gentle roll-on vs brisk.</summary>
+        public float Jerk;
 
         static readonly float[] TypeWeights = { 55, 15, 15, 7, 8 };
 
@@ -59,6 +67,10 @@ namespace Tailed.Core.Traffic
                 ReactionMin = 0.45f, ReactionMax = 1.0f,
                 StopShort = rng.Range(0.6f, 2.2f),
                 UTurnChance = 0.3f,
+                TurnSpeedFactor = rng.Range(0.85f, 1.15f),
+                TurnLine = rng.Range(-0.35f, 0.5f),
+                TurnBrakeLead = rng.Range(0f, 6f),
+                Jerk = rng.Range(1.6f, 3f),
             };
             switch (type)
             {
@@ -68,6 +80,8 @@ namespace Tailed.Core.Traffic
                     p.CriticalGap = rng.Range(5.5f, 7f); p.AmberRisk = 0f; p.Politeness = 0.8f;
                     p.WanderAmp = rng.Range(0.08f, 0.15f); p.SpeedWobble = rng.Range(0.03f, 0.05f);
                     p.ReactionMin = 0.7f; p.ReactionMax = 1.4f; p.StopShort = rng.Range(1.5f, 3f); p.UTurnChance = 0.05f;
+                    p.TurnSpeedFactor = rng.Range(0.72f, 0.9f); p.TurnLine = rng.Range(-0.45f, 0.1f); p.TurnBrakeLead = rng.Range(4f, 10f);
+                    p.Jerk = rng.Range(1.2f, 1.8f);
                     break;
                 case DriverType.Aggressive:
                     p.SpeedFactor = rng.Range(1.1f, 1.22f); p.TimeHeadway = rng.Range(0.8f, 1.1f);
@@ -75,17 +89,20 @@ namespace Tailed.Core.Traffic
                     p.ComfortDecel = rng.Range(2.6f, 3.2f); p.CriticalGap = rng.Range(2.8f, 3.5f);
                     p.AmberRisk = 0.6f; p.Politeness = 0.05f; p.IndicatorChance = 0.8f;
                     p.ReactionMin = 0.2f; p.ReactionMax = 0.5f; p.StopShort = rng.Range(0.3f, 0.9f); p.UTurnChance = 0.6f;
+                    p.TurnSpeedFactor = rng.Range(1.1f, 1.35f); p.TurnLine = rng.Range(0.2f, 0.7f); p.TurnBrakeLead = rng.Range(-2f, 1f);
+                    p.Jerk = rng.Range(2.8f, 4f);
                     break;
                 case DriverType.Lost:
                     p.SpeedFactor = rng.Range(0.8f, 0.95f); p.WrongTurnChance = 0.2f; p.CriticalGap = 5.5f; p.IndicatorChance = 0.95f;
                     p.WanderAmp = rng.Range(0.2f, 0.32f); p.SpeedWobble = rng.Range(0.08f, 0.14f); p.WobblePeriod = rng.Range(8f, 16f);
-                    p.UTurnChance = 0.7f;
+                    p.UTurnChance = 0.7f; p.TurnSpeedFactor = rng.Range(0.75f, 1f); p.TurnBrakeLead = rng.Range(2f, 9f);
                     break;
                 case DriverType.Distracted:
                     p.TimeHeadway = rng.Range(1.2f, 2.2f); p.IndicatorChance = 0.45f; p.WrongTurnChance = 0.05f;
                     p.ComfortDecel = rng.Range(2.5f, 3.2f);
                     p.WanderAmp = rng.Range(0.25f, 0.4f); p.SpeedWobble = rng.Range(0.08f, 0.15f); p.WobblePeriod = rng.Range(6f, 14f);
                     p.ReactionMin = 0.9f; p.ReactionMax = 2.6f; p.StopShort = rng.Range(0.4f, 3.2f);
+                    p.TurnLine = rng.Range(-0.5f, 0.6f); p.TurnBrakeLead = rng.Range(-1f, 8f);
                     break;
             }
             return p;

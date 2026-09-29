@@ -24,6 +24,36 @@ namespace Tailed.Core.Tests
         }
 
         [Fact]
+        public void Turns_YawSmoothly()
+        {
+            // Through every turn the pose heading must change gradually: no steps at path samples
+            // (the yaw rate never jumps between neighbouring 0.1 m steps), ordinary turns stay within a tight right turn's curvature,
+            // and position never jumps.
+            var g = LaneGraph.Build(TownGenerator.Generate(new TownConfig { Seed = 42 }));
+            float worstYaw = 0f, worstJump = 0f, worstMove = 0f;
+            string where = "";
+            foreach (var con in g.Connectors)
+            {
+                if (con.Turn == TurnType.Straight) continue;
+                const float step = 0.1f, length = 4.5f;
+                VehiclePose.Compute(g, VehicleMode.Connector, -1, con.Id, -1, 0f, length, 0f, out var lastP, out var lastH);
+                float lastYaw = -1f;
+                for (float s = step; s <= con.Length + length; s += step)
+                {
+                    VehiclePose.Compute(g, VehicleMode.Connector, -1, con.Id, -1, s, length, 0f, out var p, out var h);
+                    float yaw = MathF.Abs(MathF.Atan2(lastH.X * h.Y - lastH.Y * h.X, Vec2.Dot(lastH, h))) * 180f / MathF.PI;
+                    if (con.Turn != TurnType.UTurn) worstYaw = MathF.Max(worstYaw, yaw);
+                    if (lastYaw >= 0f && MathF.Abs(yaw - lastYaw) > worstJump) { worstJump = MathF.Abs(yaw - lastYaw); where = $"{con.Turn} s={s:0.0}"; }
+                    worstMove = MathF.Max(worstMove, Vec2.Distance(p, lastP));
+                    lastP = p; lastH = h; lastYaw = yaw;
+                }
+            }
+            Assert.True(worstYaw < 4.5f, $"heading turned {worstYaw:0.00}° in 0.1 m on a left/right turn");
+            Assert.True(worstJump < 0.6f, $"yaw rate stepped by {worstJump:0.00}°/0.1 m at {where}");
+            Assert.True(worstMove < 0.2f, $"position jumped {worstMove:0.000} m in 0.1 m");
+        }
+
+        [Fact]
         public void Router_ProducesContiguousRoutes()
         {
             var sim = NewSim(3, 0);

@@ -85,13 +85,20 @@ namespace Tailed.Core.Net
         public static void WriteIdentity(ByteWriter w, in VehicleIdentity id)
         {
             w.U8(id.ModelId); w.U8(id.ColorId); w.U8(id.Hat); w.U8(id.HatColorId);
+            w.U8(id.Skin); w.U8(id.ShirtColorId); w.U8((byte)(id.Eyes << 4 | id.Mouth)); w.U8(id.Glasses);
             w.Str(id.Plate);
         }
 
-        public static VehicleIdentity ReadIdentity(ByteReader r) => new VehicleIdentity
+        public static VehicleIdentity ReadIdentity(ByteReader r)
         {
-            ModelId = r.U8(), ColorId = r.U8(), Hat = r.U8(), HatColorId = r.U8(), Plate = r.Str(),
-        };
+            var id = new VehicleIdentity { ModelId = r.U8(), ColorId = r.U8(), Hat = r.U8(), HatColorId = r.U8() };
+            id.Skin = r.U8(); id.ShirtColorId = r.U8();
+            byte face = r.U8();
+            id.Eyes = (byte)(face >> 4); id.Mouth = (byte)(face & 15);
+            id.Glasses = r.U8();
+            id.Plate = r.Str();
+            return id;
+        }
 
         static ushort Q(float v, float scale) => (ushort)Math.Clamp(Math.Round(v * scale), 0, 65535);
     }

@@ -381,8 +381,7 @@ namespace Tailed.Core.Traffic
             else v.Waiting = false;
             if (v.ReactionTimer > 0f) { v.ReactionTimer -= dt; v.Accel = Math.Min(v.Accel, 0f); return; }
             // Throttle builds at a human rate (brakes still bite immediately).
-            const float Jerk = 2.2f;
-            if (v.Accel > 0f) v.Accel = Math.Min(v.Accel, Math.Max(prevAccel, 0f) + Jerk * dt);
+            if (v.Accel > 0f) v.Accel = Math.Min(v.Accel, Math.Max(prevAccel, 0f) + v.Profile.Jerk * dt);
         }
 
         IdmParams LaneIdm(SimVehicle v, float limit)
@@ -489,7 +488,9 @@ namespace Tailed.Core.Traffic
                 }
                 if (con.Turn != TurnType.Straight)
                 {
-                    accel = Math.Min(accel, SlowTo(v, TurnSpeed(con.Turn), remaining));
+                    // Each driver has their own turn speed and brakes for it early or late.
+                    float lead = Math.Min(v.Profile.TurnBrakeLead, remaining * 0.5f);
+                    accel = Math.Min(accel, SlowTo(v, TurnSpeed(con.Turn) * v.Profile.TurnSpeedFactor, remaining - lead));
                 }
             }
             else if (v.NextConnector < 0)
@@ -503,7 +504,7 @@ namespace Tailed.Core.Traffic
         void ThinkConnector(SimVehicle v)
         {
             var con = Graph.Connectors[v.NextConnectorOrCurrent()];
-            float limit = con.Turn == TurnType.Straight ? Graph.Lanes[con.ToLane].SpeedLimit : TurnSpeed(con.Turn);
+            float limit = con.Turn == TurnType.Straight ? Graph.Lanes[con.ToLane].SpeedLimit : TurnSpeed(con.Turn) * v.Profile.TurnSpeedFactor;
             v.Accel = Leader(v, LaneIdm(v, limit), out _);
         }
 
@@ -1009,6 +1010,15 @@ namespace Tailed.Core.Traffic
                          (0.65f * MathF.Sin(o / 19f + v.WanderPhase) + 0.35f * MathF.Sin(o / 7.3f + v.WanderPhase * 2.1f));
                 if (v.KerbTimer > 0f || (v.KerbStop >= 0 && KerbStopFront(v, Graph.KerbStops[v.KerbStop]) - v.S < 25f))
                     target = -KerbShift;
+            }
+            else if (v.Mode == VehicleMode.Connector)
+            {
+                // Everyone's own line through a turn: some cut the corner, some swing wide. Zero at both
+                // ends so it joins the lanes either side.
+                var con = Graph.Connectors[v.Connector];
+                float side = con.Turn == TurnType.Left ? 1f : con.Turn == TurnType.Right ? -1f : 0f;
+                float f = Math.Clamp((v.S - v.Length * 0.5f) / Math.Max(con.Length, 1f), 0f, 1f);
+                target = side * v.Profile.TurnLine * MathF.Sin(MathF.PI * f);
             }
             float maxStep = dt * (0.03f + 0.25f * Math.Min(v.Speed, 6f));
             v.Wander += Math.Clamp(target - v.Wander, -maxStep, maxStep);

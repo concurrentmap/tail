@@ -34,7 +34,8 @@ namespace Tailed.Core.Identity
         public float Weight;
     }
 
-    public enum HatType : byte { None, Cap, Beanie, TopHat, Cowboy, Party, Crown }
+    public enum HatType : byte { None, Cap, Beanie, TopHat, Cowboy, Party, Crown, Bucket, Headband }
+    public enum GlassesType : byte { None, Round, Sunglasses, Chunky }
 
     /// <summary>Everything an observer can learn about a vehicle. Players and NPCs are indistinguishable.</summary>
     [Serializable]
@@ -42,13 +43,19 @@ namespace Tailed.Core.Identity
     {
         public byte ModelId, ColorId;
         public byte Hat, HatColorId;
+        /// <summary>The driver (PEAK-style base character + accessories): skin tone, shirt colour, eyes, mouth, glasses.</summary>
+        public byte Skin, ShirtColorId, Eyes, Mouth, Glasses;
         /// <summary>Canonical 7-char plate.</summary>
         public string Plate;
 
         public bool Equals(VehicleIdentity o) =>
-            ModelId == o.ModelId && ColorId == o.ColorId && Hat == o.Hat && HatColorId == o.HatColorId && Plate == o.Plate;
+            ModelId == o.ModelId && ColorId == o.ColorId && Hat == o.Hat && HatColorId == o.HatColorId && Plate == o.Plate &&
+            Skin == o.Skin && ShirtColorId == o.ShirtColorId && Eyes == o.Eyes && Mouth == o.Mouth && Glasses == o.Glasses;
         public override bool Equals(object obj) => obj is VehicleIdentity o && Equals(o);
-        public override int GetHashCode() => HashCode.Combine(ModelId, ColorId, Hat, HatColorId, Plate);
+        public override int GetHashCode() => HashCode.Combine(ModelId, ColorId, Hat, HatColorId, Plate, Skin, ShirtColorId, HashCode.Combine(Eyes, Mouth, Glasses));
+
+        /// <summary>Key for the assembled driver mesh (everything that changes how the driver looks).</summary>
+        public int DriverKey => ((((Hat * 16 + HatColorId) * 8 + Skin) * 16 + ShirtColorId) * 4 + Eyes) * 64 + Mouth * 16 + Glasses;
     }
 
     public static class VehicleCatalog
@@ -84,7 +91,9 @@ namespace Tailed.Core.Identity
             new VehicleColor { Id = 11, Name = "Pink", R = 0.95f, G = 0.55f, B = 0.7f, Weight = 1 },
         };
 
-        public static readonly float[] HatWeights = { 60, 14, 10, 3, 5, 5, 1 };
+        public static readonly float[] HatWeights = { 45, 14, 10, 3, 5, 5, 1, 8, 6 };
+        public static readonly float[] GlassesWeights = { 60, 15, 15, 10 };
+        public const int SkinTones = 6, EyeStyles = 4, MouthStyles = 4;
 
         public static float[] ModelWeights()
         {
@@ -148,7 +157,12 @@ namespace Tailed.Core.Identity
             ModelId = (byte)modelId,
             ColorId = (byte)colorId,
             Hat = (byte)_rng.PickWeighted(VehicleCatalog.HatWeights),
-            HatColorId = (byte)_rng.PickWeighted(_colors),
+            HatColorId = (byte)_rng.NextInt(VehicleCatalog.Colors.Length), // any colour: hats are fun, fleets are grey
+            Skin = (byte)_rng.NextInt(VehicleCatalog.SkinTones),
+            ShirtColorId = (byte)_rng.NextInt(VehicleCatalog.Colors.Length),
+            Eyes = (byte)_rng.NextInt(VehicleCatalog.EyeStyles),
+            Mouth = (byte)_rng.NextInt(VehicleCatalog.MouthStyles),
+            Glasses = (byte)_rng.PickWeighted(VehicleCatalog.GlassesWeights),
             Plate = _plates.Next(),
         };
 

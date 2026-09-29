@@ -14,6 +14,10 @@ namespace Tailed.Vehicles
         public Vector3 Eye;
         public Vector3 RearViewMirror, LeftMirror, RightMirror;
         public Vector3 FrontPlate, RearPlate;
+        // Style (for the Blender art pipeline): body features and nose/tail slope lengths (m).
+        public string Style;
+        public bool PickupBed, CargoBox, RoofRails, Bus, BoxBody;
+        public float Hood, Trunk, CabRoofHeight;
     }
 
     /// <summary>
@@ -72,6 +76,9 @@ namespace Tailed.Vehicles
                 CabinFront = -L * 0.5f + L * st.CabinEnd,
                 CabinHalfWidth = m.Width * 0.5f * st.CabinWidth,
             };
+            s.Style = m.Style.ToString();
+            s.PickupBed = st.PickupBed; s.CargoBox = st.CargoBox; s.RoofRails = st.RoofRails; s.Bus = st.Bus; s.BoxBody = st.BoxBody;
+            s.Hood = L * st.Hood; s.Trunk = L * st.Trunk; s.CabRoofHeight = H * st.CabRoof;
             s.RoofRear = s.CabinRear + L * st.RoofRearInset;
             s.RoofFront = s.CabinFront - L * st.RoofFrontInset;
             float seatZ = Mathf.Lerp(s.RoofFront, s.CabinFront, 0.2f) - 0.55f;
@@ -79,14 +86,19 @@ namespace Tailed.Vehicles
             // Seated eye roughly 55% of the way from beltline to roof (~30 cm under a sedan roof).
             s.Eye = new Vector3(-m.Width * 0.2f, s.Belt + (cabH - s.Belt) * (st.Bus ? 0.3f : 0.55f), seatZ);
             // Rear-view mirror hangs from the top of the windscreen, above the eye line.
-            s.RearViewMirror = new Vector3(0f, cabH - 0.13f, Mathf.Lerp(s.RoofFront, s.CabinFront, 0.12f) - 0.05f);
+            // Hangs below the roof cap (its underside is 0.16 m down on the Blender-built bodies), so the
+            // whole glass shows through the windscreen instead of being cut off by the headliner.
+            s.RearViewMirror = new Vector3(0f, cabH - 0.22f, Mathf.Lerp(s.RoofFront, s.CabinFront, 0.12f) - 0.05f);
             // Door-mounted wing mirrors, behind the A-pillar base so the driver sees them through the side glass.
             s.LeftMirror = new Vector3(-m.Width * 0.5f - 0.16f, s.Belt + 0.06f, s.CabinFront - 0.32f);
             s.RightMirror = new Vector3(m.Width * 0.5f + 0.16f, s.Belt + 0.06f, s.CabinFront - 0.32f);
             // Big plates sit on the bumper, as high as the flat end face allows; on low noses/tails
             // they hang a little lower (a bracket in the body mesh fills any gap behind them).
-            s.FrontPlate = new Vector3(0f, PlateY(s.Clearance, s.Belt - L * st.Hood * 1.5f, 0.26f), L * 0.5f + 0.07f);
-            s.RearPlate = new Vector3(0f, PlateY(s.Clearance, s.Belt - L * st.Trunk * 1.5f, 0.34f), -L * 0.5f - 0.07f);
+            // Nose/tail face tops: low cars keep at least 0.34 m of flat face (matches the Blender builder).
+            float noseTop = Mathf.Max(s.Belt - L * st.Hood * 1.5f, s.Clearance + 0.34f);
+            float tailTop = Mathf.Max(s.Belt - L * st.Trunk * 1.5f, s.Clearance + 0.34f);
+            s.FrontPlate = new Vector3(0f, PlateY(s.Clearance, noseTop, 0.26f), L * 0.5f + 0.07f);
+            s.RearPlate = new Vector3(0f, PlateY(s.Clearance, tailTop, 0.34f), -L * 0.5f - 0.07f);
             ShapeCache[modelId] = s;
             return s;
         }
@@ -117,8 +129,56 @@ namespace Tailed.Vehicles
         /// <summary>Body with cockpit interior panels, for the local player's car.</summary>
         public static Mesh PlayerBody(int modelId, int colorId) => BuildBody(modelId, BodyColor(colorId), interior: true);
 
+        /// <summary>Resource name of a model's Blender-built mesh (tools/blender/build_assets.py).</summary>
+        public static string ArtName(int modelId) => (VehicleCatalog.Models[modelId].Make + VehicleCatalog.Models[modelId].Name).Replace(" ", "");
+
+        static readonly Color PaintMarker = new Color(1f, 0f, 1f, 1f);
+
+        /// <summary>
+        /// The Blender-built body (if present): a copy with the paint marker swapped for the car's colour,
+        /// plus the cockpit interior for the player's own car. Null → fall back to the generated body.
+        /// </summary>
+        static Mesh ArtBody(int modelId, Color paint, bool interior)
+        {
+            var src = Resources.Load<Mesh>("Art/Vehicles/" + ArtName(modelId) + (interior ? "_Player" : ""));
+            if (src == null || !src.isReadable) return null;
+            var verts = new List<Vector3>(src.vertices);
+            var normals = new List<Vector3>(src.normals);
+            var colors = new List<Color>(src.colors);
+            for (int i = 0; i < colors.Count; i++)
+            {
+                var c = colors[i];
+                if (c.r > 0.95f && c.g < 0.05f && c.b > 0.95f) colors[i] = new Color(paint.r, paint.g, paint.b, 1f);
+            }
+            var body = new List<int>(src.GetTriangles(0));
+            var glass = src.subMeshCount > 1 ? new List<int>(src.GetTriangles(1)) : new List<int>();
+            if (interior)
+            {
+                var mb = new MeshBuilder();
+                AddInterior(mb, Shape(modelId), Styles[VehicleCatalog.Models[modelId].Style]);
+                var extra = mb.Build("Interior");
+                int offset = verts.Count;
+                verts.AddRange(extra.vertices);
+                normals.AddRange(extra.normals);
+                colors.AddRange(extra.colors);
+                foreach (int t in extra.GetTriangles(0)) body.Add(t + offset);
+                Object.Destroy(extra);
+            }
+            var mesh = new Mesh { name = "Car_" + ArtName(modelId), indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
+            mesh.SetVertices(verts);
+            mesh.SetNormals(normals);
+            mesh.SetColors(colors);
+            mesh.subMeshCount = 2;
+            mesh.SetTriangles(body, 0);
+            mesh.SetTriangles(glass, 1);
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
         static Mesh BuildBody(int modelId, Color paint, bool interior)
         {
+            var art = ArtBody(modelId, paint, interior);
+            if (art != null) return art;
             var m = VehicleCatalog.Models[modelId];
             var st = Styles[m.Style];
             var s = Shape(modelId);
@@ -256,41 +316,187 @@ namespace Tailed.Vehicles
                 foreach (var mp in new[] { s.LeftMirror, s.RightMirror })
                     mb.LocalBox(mp + new Vector3(-0.1f, -0.07f, -0.02f), mp + new Vector3(0.1f, 0.07f, 0.08f), Trim);
 
-            if (interior)
-            {
-                // Dashboard, door cards, headliner, headrests, steering wheel: what the cockpit camera sees.
-                mb.LocalBox(new Vector3(-cw + 0.02f, belt - 0.25f, s.CabinFront - 0.55f), new Vector3(cw - 0.02f, belt + 0.06f, s.CabinFront + 0.05f), Interior);
-                mb.Polygon(new[] { new Vector3(-hw + 0.06f, clr + 0.1f, zr + 0.2f), new Vector3(-hw + 0.06f, clr + 0.1f, zf - 0.2f), new Vector3(-hw + 0.06f, belt, zf - 0.2f), new Vector3(-hw + 0.06f, belt, zr + 0.2f) }, Interior, Vector3.right);
-                mb.Polygon(new[] { new Vector3(hw - 0.06f, clr + 0.1f, zr + 0.2f), new Vector3(hw - 0.06f, clr + 0.1f, zf - 0.2f), new Vector3(hw - 0.06f, belt, zf - 0.2f), new Vector3(hw - 0.06f, belt, zr + 0.2f) }, Interior, Vector3.left);
-                mb.Polygon(new[] { new Vector3(-cw, roofY - 0.1f, s.RoofRear), new Vector3(cw, roofY - 0.1f, s.RoofRear), new Vector3(cw, roofY - 0.1f, s.RoofFront), new Vector3(-cw, roofY - 0.1f, s.RoofFront) }, new Color(0.78f, 0.76f, 0.72f), Vector3.down);
-                mb.Polygon(new[] { new Vector3(-cw, clr + 0.12f, zr + 0.2f), new Vector3(cw, clr + 0.12f, zr + 0.2f), new Vector3(cw, clr + 0.12f, zf - 0.3f), new Vector3(-cw, clr + 0.12f, zf - 0.3f) }, Interior, Vector3.up);
-                float seatZ = s.Eye.z - 0.3f;
-                foreach (float x in new[] { s.Eye.x, -s.Eye.x })
-                {
-                    // Seat backs only: the driver's own headrest is behind their head, never in view.
-                    mb.LocalBox(new Vector3(x - 0.24f, belt - 0.35f, seatZ - 0.12f), new Vector3(x + 0.24f, belt + 0.15f, seatZ), Interior);
-                }
-                // Rear seat headrests are what you look past in the rear-view mirror.
-                float rearZ = Mathf.Lerp(s.CabinRear, seatZ, 0.4f);
-                if (!st.CargoBox && !st.PickupBed)
-                    foreach (float x in new[] { -cw * 0.55f, 0f, cw * 0.55f })
-                        mb.LocalBox(new Vector3(x - 0.1f, belt + 0.1f, rearZ - 0.08f), new Vector3(x + 0.1f, belt + 0.2f, rearZ), Interior);
-                var wheelC = new Vector3(s.Eye.x, belt + 0.02f, s.CabinFront - 0.62f);
-                for (int i = 0; i < 10; i++)
-                {
-                    float a0 = i * Mathf.PI * 0.2f, a1 = (i + 1) * Mathf.PI * 0.2f;
-                    Vector3 R(float a) => wheelC + new Vector3(Mathf.Cos(a) * 0.19f, Mathf.Sin(a) * 0.19f * 0.9f, Mathf.Sin(a) * 0.19f * -0.4f);
-                    mb.Beam(R(a0), R(a1), 0.035f, Trim);
-                }
-            }
+            if (interior) AddInterior(mb, s, st);
 
             var mesh = mb.Build($"Car_{m.Make}{m.Name}");
             return mesh;
         }
 
-        /// <summary>Bean driver with a hat. Cosmetics come from the shared NPC pool (GD §13).</summary>
+        /// <summary>Cockpit panels the first-person camera sees (dashboard, doors, headliner, seats, wheel).</summary>
+        static void AddInterior(MeshBuilder mb, CarShape s, Style st)
+        {
+            float L = s.Length, hw = s.Width * 0.5f, zr = -L * 0.5f, zf = L * 0.5f;
+            float belt = s.Belt, clr = s.Clearance, cw = s.CabinHalfWidth, roofY = s.CabRoofHeight;
+
+                // Dashboard, door cards, headliner, headrests, steering wheel: what the cockpit camera sees.
+                // Sculpted dash: padded roll facing the driver, a top pad sloping down to the windscreen,
+                // and a lighter lower (knee) panel.
+                {
+                    float dz = s.CabinFront - 0.55f, cf = s.CabinFront + 0.05f;
+                    mb.ProfileExtrude(MeshBuilder.Chamfer(new[]
+                    {
+                        new Vector2(dz, belt - 0.12f), new Vector2(cf, belt - 0.12f), new Vector2(cf, belt - 0.02f),
+                        new Vector2(dz + 0.2f, belt + 0.07f), new Vector2(dz + 0.02f, belt + 0.07f),
+                        new Vector2(dz - 0.04f, belt + 0.02f), new Vector2(dz - 0.04f, belt - 0.08f),
+                    }, 0.025f, 2), cw - 0.02f, DashTop);
+                    mb.LocalBox(new Vector3(-cw + 0.02f, belt - 0.3f, dz + 0.02f), new Vector3(cw - 0.02f, belt - 0.1f, cf), Interior);
+                    mb.LocalBox(new Vector3(-cw + 0.03f, belt - 0.115f, dz - 0.035f), new Vector3(cw - 0.03f, belt - 0.095f, dz + 0.03f), new Color(0.55f, 0.53f, 0.5f)); // trim strip
+                }
+                mb.Polygon(new[] { new Vector3(-hw + 0.06f, clr + 0.1f, zr + 0.2f), new Vector3(-hw + 0.06f, clr + 0.1f, zf - 0.2f), new Vector3(-hw + 0.06f, belt, zf - 0.2f), new Vector3(-hw + 0.06f, belt, zr + 0.2f) }, Interior, Vector3.right);
+                mb.Polygon(new[] { new Vector3(hw - 0.06f, clr + 0.1f, zr + 0.2f), new Vector3(hw - 0.06f, clr + 0.1f, zf - 0.2f), new Vector3(hw - 0.06f, belt, zf - 0.2f), new Vector3(hw - 0.06f, belt, zr + 0.2f) }, Interior, Vector3.left);
+                mb.Polygon(new[] { new Vector3(-cw, roofY - 0.1f, s.RoofRear), new Vector3(cw, roofY - 0.1f, s.RoofRear), new Vector3(cw, roofY - 0.1f, s.RoofFront), new Vector3(-cw, roofY - 0.1f, s.RoofFront) }, new Color(0.78f, 0.76f, 0.72f), Vector3.down);
+                mb.Polygon(new[] { new Vector3(-cw, clr + 0.12f, zr + 0.2f), new Vector3(cw, clr + 0.12f, zr + 0.2f), new Vector3(cw, clr + 0.12f, zf - 0.3f), new Vector3(-cw, clr + 0.12f, zf - 0.3f) }, Interior, Vector3.up);
+                float seatZ = s.Eye.z - 0.3f;
+                float dashZ0 = s.CabinFront - 0.55f, cabFront = s.CabinFront + 0.05f;
+                float floor = clr + 0.13f;
+                float cushion = Mathf.Max(floor + 0.2f, belt - 0.4f); // seat cushion top
+                // Carpeted floor, transmission tunnel, and the footwell/toe board under the dash.
+                mb.LocalBox(new Vector3(-cw + 0.02f, clr + 0.1f, s.CabinRear + 0.05f), new Vector3(cw - 0.02f, floor, cabFront), Carpet);
+                mb.LocalBox(new Vector3(-0.13f, floor, seatZ - 0.6f), new Vector3(0.13f, floor + 0.13f, dashZ0 + 0.2f), Carpet);
+                mb.ProfileExtrude(new[]
+                {
+                    new Vector2(dashZ0 + 0.3f, floor), new Vector2(cabFront, floor), new Vector2(cabFront, belt - 0.3f), new Vector2(dashZ0 + 0.03f, belt - 0.3f),
+                }, cw - 0.03f, Carpet);
+                // Pedals on the driver's side (brake and throttle), and the handbrake by the console.
+                foreach (var (dx, w, h) in new[] { (-0.1f, 0.09f, 0.08f), (0.09f, 0.06f, 0.14f) })
+                {
+                    var pad = new Vector3(s.Eye.x + dx, floor + 0.12f, dashZ0 + 0.12f);
+                    mb.Beam(pad + new Vector3(0f, 0.02f, 0.02f), pad + new Vector3(0f, 0.2f, 0.14f), 0.018f, Trim);
+                    mb.LocalBox(pad - new Vector3(w * 0.5f, h * 0.5f, 0.015f), pad + new Vector3(w * 0.5f, h * 0.5f, 0.015f), new Color(0.3f, 0.3f, 0.32f));
+                }
+                var brake = new Vector3(s.Eye.x * 0.45f, floor + 0.14f, seatZ + 0.35f);
+                mb.Beam(brake, brake + new Vector3(0f, 0.08f, 0.2f), 0.03f, Trim);
+                // Front seats: pedestal, cushion with bolsters, full-height back; passenger headrest.
+                foreach (float x in new[] { s.Eye.x, -s.Eye.x })
+                {
+                    mb.LocalBox(new Vector3(x - 0.18f, floor, seatZ + 0.05f), new Vector3(x + 0.18f, cushion - 0.1f, seatZ + 0.42f), Trim);
+                    mb.LocalBox(new Vector3(x - 0.25f, cushion - 0.12f, seatZ), new Vector3(x + 0.25f, cushion, seatZ + 0.52f), Seat);
+                    foreach (float side in new[] { -1f, 1f })
+                        mb.LocalBox(new Vector3(x + side * 0.25f - 0.045f, cushion - 0.02f, seatZ + 0.05f), new Vector3(x + side * 0.25f + 0.045f, cushion + 0.05f, seatZ + 0.48f), Seat);
+                    mb.LocalBox(new Vector3(x - 0.24f, cushion - 0.05f, seatZ - 0.14f), new Vector3(x + 0.24f, belt + 0.15f, seatZ), Seat);
+                    foreach (float side in new[] { -1f, 1f })
+                        mb.LocalBox(new Vector3(x + side * 0.24f - 0.04f, cushion + 0.05f, seatZ - 0.12f), new Vector3(x + side * 0.24f + 0.04f, belt + 0.05f, seatZ + 0.05f), Seat);
+                    mb.LocalBox(new Vector3(x - 0.2f, cushion + 0.02f, seatZ - 0.005f), new Vector3(x + 0.2f, belt + 0.12f, seatZ + 0.002f), SeatInsert);
+                }
+                mb.LocalBox(new Vector3(-s.Eye.x - 0.12f, belt + 0.2f, seatZ - 0.12f), new Vector3(-s.Eye.x + 0.12f, belt + 0.38f, seatZ - 0.02f), Seat);
+                mb.Beam(new Vector3(-s.Eye.x - 0.06f, belt + 0.14f, seatZ - 0.07f), new Vector3(-s.Eye.x - 0.06f, belt + 0.21f, seatZ - 0.07f), 0.015f, Trim);
+                mb.Beam(new Vector3(-s.Eye.x + 0.06f, belt + 0.14f, seatZ - 0.07f), new Vector3(-s.Eye.x + 0.06f, belt + 0.21f, seatZ - 0.07f), 0.015f, Trim);
+                // Door cards: armrest, door pocket and pull handle on each side.
+                foreach (float side in new[] { -1f, 1f })
+                {
+                    float xo = side * (hw - 0.06f), xi = side * (hw - 0.15f);
+                    float a0 = Mathf.Min(xo, xi), a1 = Mathf.Max(xo, xi);
+                    mb.LocalBox(new Vector3(a0, belt - 0.24f, seatZ - 0.1f), new Vector3(a1, belt - 0.17f, seatZ + 0.55f), Seat);
+                    mb.LocalBox(new Vector3(Mathf.Min(xo, side * (hw - 0.11f)), floor + 0.08f, seatZ + 0.45f), new Vector3(Mathf.Max(xo, side * (hw - 0.11f)), floor + 0.26f, dashZ0 - 0.05f), Trim);
+                    mb.LocalBox(new Vector3(Mathf.Min(xo, side * (hw - 0.09f)), belt - 0.1f, seatZ + 0.5f), new Vector3(Mathf.Max(xo, side * (hw - 0.09f)), belt - 0.05f, seatZ + 0.62f), new Color(0.6f, 0.6f, 0.62f));
+                    mb.LocalBox(new Vector3(a0, belt - 0.02f, s.CabinRear + 0.1f), new Vector3(a1, belt + 0.01f, cabFront - 0.1f), SeatInsert); // window-line trim
+                }
+                float rearZ = Mathf.Lerp(s.CabinRear, seatZ, 0.4f);
+                // Closes the tub behind the rear seats (the body shell is open over the cabin).
+                mb.LocalBox(new Vector3(-cw, clr + 0.1f, s.CabinRear + 0.02f), new Vector3(cw, belt + 0.02f, s.CabinRear + 0.07f), Interior);
+                if (!st.CargoBox && !st.PickupBed && !st.BoxBody && !st.Bus)
+                {
+                    // Rear bench: cushion and back; headrests are what you look past in the rear-view mirror.
+                    mb.LocalBox(new Vector3(-cw + 0.06f, cushion - 0.14f, rearZ), new Vector3(cw - 0.06f, cushion - 0.02f, Mathf.Min(rearZ + 0.5f, seatZ - 0.35f)), Seat);
+                    mb.LocalBox(new Vector3(-cw + 0.06f, floor, rearZ + 0.05f), new Vector3(cw - 0.06f, cushion - 0.14f, Mathf.Min(rearZ + 0.45f, seatZ - 0.4f)), Carpet);
+                    mb.LocalBox(new Vector3(-cw + 0.06f, cushion - 0.1f, rearZ - 0.14f), new Vector3(cw - 0.06f, belt + 0.08f, rearZ), Seat);
+                    foreach (float x in new[] { -cw * 0.55f, 0f, cw * 0.55f })
+                        mb.LocalBox(new Vector3(x - 0.1f, belt + 0.1f, rearZ - 0.12f), new Vector3(x + 0.1f, belt + 0.22f, rearZ - 0.02f), Seat);
+                }
+                else if (st.CargoBox)
+                {
+                    // Van: bulkhead behind the seats with a small window, cargo floor beyond.
+                    float bz = seatZ - 0.25f;
+                    mb.LocalBox(new Vector3(-cw + 0.02f, floor, bz - 0.04f), new Vector3(cw - 0.02f, belt + 0.1f, bz), Trim);
+                    mb.LocalBox(new Vector3(-cw + 0.02f, belt + 0.45f, bz - 0.04f), new Vector3(cw - 0.02f, roofY - 0.12f, bz), Trim);
+                    foreach (float x in new[] { -cw + 0.02f, cw - 0.28f })
+                        mb.LocalBox(new Vector3(x, belt + 0.1f, bz - 0.04f), new Vector3(x + 0.26f, belt + 0.45f, bz), Trim);
+                }
+                // (The steering wheel, hands and gauges are live: CockpitRig.)
+                // Centre console with a gear stick, and dash detail: vents, radio, glovebox seam.
+                float dashZ = s.CabinFront - 0.55f;
+                mb.LocalBox(new Vector3(-0.11f, clr + 0.12f, seatZ + 0.1f), new Vector3(0.11f, belt - 0.22f, dashZ), Interior);
+                mb.LocalBox(new Vector3(-0.1f, cushion + 0.05f, seatZ - 0.05f), new Vector3(0.1f, cushion + 0.12f, seatZ + 0.35f), Seat); // centre armrest
+                mb.LocalBox(new Vector3(-0.1f, belt - 0.24f, dashZ - 0.06f), new Vector3(0.1f, belt - 0.02f, dashZ + 0.01f), new Color(0.2f, 0.2f, 0.22f));
+                mb.LocalBox(new Vector3(-0.075f, belt - 0.1f, dashZ - 0.075f), new Vector3(0.075f, belt - 0.05f, dashZ - 0.055f), new Color(0.3f, 0.75f, 0.85f));
+                var stick = new Vector3(0f, belt - 0.22f, dashZ - 0.28f);
+                mb.Beam(stick, stick + new Vector3(0f, 0.16f, -0.03f), 0.022f, Trim);
+                mb.SmoothSphere(stick + new Vector3(0f, 0.18f, -0.035f), new Vector3(0.035f, 0.035f, 0.035f), new Color(0.15f, 0.15f, 0.17f), 10, 7);
+                foreach (float x in new[] { -cw + 0.12f, -0.2f, 0.2f, cw - 0.12f })
+                    mb.LocalBox(new Vector3(x - 0.06f, belt - 0.06f, dashZ - 0.012f), new Vector3(x + 0.06f, belt - 0.01f, dashZ + 0.01f), new Color(0.12f, 0.12f, 0.13f));
+                float glove = -s.Eye.x;
+                mb.LocalBox(new Vector3(glove - 0.2f, belt - 0.2f, dashZ - 0.008f), new Vector3(glove + 0.2f, belt - 0.19f, dashZ + 0.005f), new Color(0.2f, 0.2f, 0.22f));
+        }
+
+        static readonly Color DashTop = new Color(0.16f, 0.16f, 0.18f);
+        static readonly Color Seat = new Color(0.3f, 0.3f, 0.34f), SeatInsert = new Color(0.4f, 0.38f, 0.36f), Carpet = new Color(0.14f, 0.14f, 0.16f);
+
+        /// <summary>Skin tones for the driver (VehicleIdentity.Skin).</summary>
+        public static readonly Color[] SkinTones =
+        {
+            new Color(0.98f, 0.84f, 0.70f), new Color(0.94f, 0.75f, 0.58f), new Color(0.80f, 0.58f, 0.42f),
+            new Color(0.58f, 0.40f, 0.27f), new Color(0.38f, 0.26f, 0.18f), new Color(0.98f, 0.86f, 0.35f),
+        };
+
+        static readonly Dictionary<int, Mesh> ArtDriverCache = new Dictionary<int, Mesh>();
+
+        /// <summary>
+        /// PEAK-style driver: the Blender base character plus this identity's eyes, mouth, hat and
+        /// glasses, with marker colours swapped for its skin, shirt and hat colours. Null if the art
+        /// kit isn't in the build (falls back to the procedural bean).
+        /// </summary>
+        static Mesh ArtDriver(VehicleIdentity id)
+        {
+            if (ArtDriverCache.TryGetValue(id.DriverKey, out var cached)) return cached;
+            var baseMesh = Resources.Load<Mesh>("Art/Characters/DriverBase");
+            if (baseMesh == null || !baseMesh.isReadable) return null;
+            var parts = new List<Mesh> { baseMesh };
+            void Add(string name) { var m = Resources.Load<Mesh>("Art/Characters/" + name); if (m != null && m.isReadable) parts.Add(m); }
+            Add("Eyes" + id.Eyes % VehicleCatalog.EyeStyles);
+            Add("Mouth" + id.Mouth % VehicleCatalog.MouthStyles);
+            if (id.Hat > 0) Add("Hat" + id.Hat);
+            if (id.Glasses > 0) Add("Glasses" + id.Glasses);
+
+            var skin = SkinTones[id.Skin % SkinTones.Length];
+            var shirt = BodyColor(id.ShirtColorId % VehicleCatalog.Colors.Length);
+            var hat = BodyColor(id.HatColorId % VehicleCatalog.Colors.Length);
+            var accent = Color.Lerp(hat, Color.black, 0.35f);
+            var verts = new List<Vector3>(); var normals = new List<Vector3>(); var colors = new List<Color>(); var tris = new List<int>();
+            foreach (var m in parts)
+            {
+                int offset = verts.Count;
+                verts.AddRange(m.vertices);
+                normals.AddRange(m.normals);
+                foreach (var c in m.colors)
+                {
+                    // Marker colours from the Blender kit → this driver's colours.
+                    bool r = c.r > 0.95f, g = c.g > 0.95f, b = c.b > 0.95f, r0 = c.r < 0.05f, g0 = c.g < 0.05f, b0 = c.b < 0.05f;
+                    Color o = c;
+                    if (r0 && g && b0) o = skin;
+                    else if (r0 && g && b) o = shirt;
+                    else if (r && g && b0) o = hat;
+                    else if (r0 && g0 && b) o = accent;
+                    o.a = 1f;
+                    colors.Add(o);
+                }
+                for (int sm = 0; sm < m.subMeshCount; sm++)
+                    foreach (int t in m.GetTriangles(sm)) tris.Add(t + offset);
+            }
+            var mesh = new Mesh { name = "Driver", indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
+            mesh.SetVertices(verts);
+            mesh.SetNormals(normals);
+            mesh.SetColors(colors);
+            mesh.SetTriangles(tris, 0);
+            mesh.RecalculateBounds();
+            ArtDriverCache[id.DriverKey] = mesh;
+            return mesh;
+        }
+
+        /// <summary>The driver mesh for an identity (Blender kit when present, else the procedural bean).</summary>
         public static Mesh Driver(VehicleIdentity id)
         {
+            var art = ArtDriver(id);
+            if (art != null) return art;
             int key = id.Hat * 4096 + id.HatColorId * 64 + (id.Plate != null ? id.Plate[6] % 8 : 0);
             if (DriverCache.TryGetValue(key, out var mesh)) return mesh;
             var mb = new MeshBuilder();
